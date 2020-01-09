@@ -10,37 +10,8 @@
 #include <sys/types.h>
 #include <sys/inotify.h>
 #include <sys/stat.h>
-
-
-#define EVENT_SIZE  (sizeof (struct inotify_event))
-#define EVENT_BUF_LEN  (1024 * ( EVENT_SIZE + 16 ))
-#define BASE_DIR "/tmp/inotify_test"
-
-//Stucture to map inotify watch descriptors to fs paths
-struct w_dir {
-    int wd; // inotify watch descriptor
-    int ifd; // inotify instance fd
-    struct w_dir* list; // w_dir parent list
-    struct w_dir* next; // next w_dir in list
-    char path[1]; // path of directory being monitored
-};
-
-void read_events_fd(int fd);
-struct w_dir *monitor_watch_dir(char *dpath);
-struct w_dir *create_watch_dir(char *dpath, int wd);
-static struct w_dir *_get_dir_by_wd(int wd, struct w_dir *list);
-struct w_dir *get_dir_by_wd(int wd);
-static struct w_dir *_get_dir_by_path(char *path, struct w_dir *list);
-struct w_dir *get_dir_by_path(char *path);
-static struct w_dir *_add_watch_dir_to_list(char *dpath, struct w_dir *list);
-struct w_dir *add_watch_dir_to_list(char *dpath);
-static int _remove_watch_dir(struct w_dir *wdir, struct w_dir *list);
-int remove_watch_dir(struct w_dir *wdir);
-static int _remove_watch_dir_by_path(char *path, struct w_dir *list);
-int remove_watch_dir_by_path(char *path);
-char *create_wd_full_path(int wd, char *name);
-void debug_show_list(struct w_dir *list);
-
+#include <jansson.h>
+#include "includes/mon_fs.h"
 
 /*Global vars*/
 struct w_dir *_WATCH_LIST = NULL;
@@ -82,16 +53,125 @@ void debug_show_list(struct w_dir *list){
     return;
 }
 
-struct w_dir * create_watch_dir(char *dpath, int inotify_fd){
+json_t *json_from_file(char *path){
+    json_t *json = NULL;
+    json_error_t error;
+    if (!path || !strlen(path)){
+        fprintf(stderr, "Empty config path provided to parse_config\n");
+        return NULL;
+    }
+    json = json_load_file(path, 0, &error);
+    if(!json) {
+        fprintf(stderr, "Error parsing config:'%s'. Error:'%s'\n", path, error ? (error->text ?: "") : "");
+    }
+    return json;
+}
+
+//Create/allocate new event monitor. To be free'd by caller
+struct event_mon *create_event_monitor(char *base_path, 
+                                       char *config_path,
+                                       uint32_t mask, 
+                                       loopctl_func *loopctl,
+                                       event_handler *handler, 
+                                       size_t event_buf_len){
+    struct event_mon *mon = NULL;
+    int ifd = -1;
+    if (!base_path || !strlen(base_path)){
+        fprintf(stderr, "Empty basepath provided to create event monitor\n");
+        return NULL;
+    }
+    size_t buflen = event_buf_len;
+    if (event_buf_len >= INOT_EVENT_SIZE + 16 ){
+        buflen = (event_buf_len * ( INOT_EVENT_SIZE + 16 ));
+    }else{
+        buflen = (size_t) INOT_DEFAULT_EVENT_BUF_LEN; 
+    }
+    // Create the inotify watch instance
+    ifd = inotify_init();
+    /*checking for error*/
+    if (ifd < 0 ) {
+        fpritnf(stderr, "inotify_init error for path:'%s'\n", base_path);
+        return NULL; 
+    }
+    mon = calloc(1, sizeof(struct event_mon) + buflen);
+    if (!mon){
+        fprintf(stderr, "Error allocating new event monitor!\n");
+        close(ifd); 
+        return NULL;
+    }
+    mon->ifd = ifd;
+    mon->mask;
+    mon->buf_len = event_buf_len;
+    mon->handler = handler;
+    mon->loopctl = loopctl;
+    mon->config_path = config_path;
+    if (do_mon_config(mon)){
+        fprintf(stderr, "Error applying event monitor config. Dir:'%s', config:'%s'\n", base_path, config_path ?: "");
+        close(ifd);
+        free(mon);
+        return NULL;
+    }
+    // Add the base dir to the monitor, this initializes the watch_list with this w_dir 
+    struct w_dir *wdir = monitor_watch_dir(base_path, mon);
+    if (!wdir){
+        fpritnf(stderr, "Error adding base dir to event monitor:'%s'\n", base_path);
+        close(ifd);
+        free(mon);
+        exit (1);
+    }
+    mon->base_wd = wdir-wd;
+    if (!mon->watch_list){
+        mon->watch_list = wdir;
+    }
+    watch_base = wdir->wd;
+    return mon;
+}
+
+// returns null to allow assignment by caller. 
+struct event_mon *destroy_event_monitor(event_mon *mon){
+    // Close our inotify event fd
+    if (mon->ifd >= 0){
+        close(mon->ifd);
+    }
+    // decrement ref to monitor's json obj(s)
+    if (mon->jconfig){
+        json_decref(mon->jconfig);
+    }
+   
+    // Remove and free all the watch dirs 
+    struct w_dir *ptr = mon->watch_list;
+    struct w_dir *cur = mon->watch_list;
+    if (ptr){
+        while (ptr != NULL){
+            cur = ptr;
+            ptr = ptr->next;
+            remove_watch_dir(cur, mon->watch_list, 1);
+        }
+    }
+    free(mon);
+    return NULL;
+}
+
+//Create/allocate new watch dir.  To be free'd by caller
+struct w_dir * create_watch_dir(char *dpath, struct event_mon *mon){
+    int inotify_fd;
+    uint32_t mask;
     if (!dpath || !strlen(dpath)){
         fprintf(stderr, "Null dir name provided\n");
         return NULL;
     }
+    if (!mon){
+        fprintf(stderr, "Null event monitor provided\n");
+        return NULL;
+    }
+    inotify_fd = mon->ifd;
+    mask = mon->mask; //IN_CREATE | IN_DELETE | IN_MODIFY
     if (inotify_fd < 0){
         fprintf(stderr, "Bad inotify instance fd provided:'%d'\n", inotify_fd);
         return NULL;
     }
-    int wd = inotify_add_watch( inotify_fd, dpath, IN_CREATE | IN_DELETE | IN_MODIFY);
+    // Add dir path to our watcher
+    int wd = inotify_add_watch( inotify_fd, dpath, mask);
     if (wd < 0){
         fprintf(stderr, "Could not add watcher for path:'%s', instance fd:'%d'\n", dpath ?: "", inotify_fd);
         return NULL;
@@ -100,17 +180,17 @@ struct w_dir * create_watch_dir(char *dpath, int inotify_fd){
     if (newd != NULL){
         newd->wd = wd;
         newd->ifd = inotify_fd;
-        newd->list = NULL;
+        newd->evt_mon = mon;
         newd->next = NULL;
         strcpy(newd->path, dpath);
     }
     return newd;
 }
 
-static struct w_dir * _get_dir_by_wd(int wd, struct w_dir *list){
+struct w_dir * get_dir_by_wd(int wd, struct w_dir *list){
     struct w_dir *wlist = list;
     if (!wlist){
-        wlist = _WATCH_LIST;
+        return NULL;;
     }
     struct w_dir *ptr = wlist;
     while(ptr != NULL) {
@@ -122,12 +202,14 @@ static struct w_dir * _get_dir_by_wd(int wd, struct w_dir *list){
     return NULL;
 }
 
+/*
 struct w_dir *get_dir_by_wd(int wd){
     return _get_dir_by_wd(wd, _WATCH_LIST);
 }
+*/
 
 
-static struct w_dir * _get_dir_by_path(char *path, struct w_dir *list){
+struct w_dir * get_dir_by_path(char *path, struct w_dir *list){
     struct w_dir *wlist = list;
     if (!wlist){
         wlist = _WATCH_LIST;
@@ -142,67 +224,56 @@ static struct w_dir * _get_dir_by_path(char *path, struct w_dir *list){
     return NULL;
 }
 
+/*
 struct w_dir * get_dir_by_path(char *path){
     return _get_dir_by_path(path, _WATCH_LIST);
 }
+*/
 
-
-
-static struct w_dir *_add_watch_dir_to_list(char *dpath, struct w_dir *list){
-    struct w_dir *wlist = list;
+// Create mapping for dir to watch descriptor and add to the event_monitor list...
+struct w_dir *add_watch_dir_to_monitor(char *dpath, struct event_mon *mon){
+    if (!mon){
+        fprintf(stderr, "Was provided null event_mon\n");
+        return NULL;
+    }
+    struct w_dir *wlist = mon->watch_list;
+    struct w_dir *wdir = NULL;
     int wd;
     if (!dpath || !strlen(dpath)){
         fprintf(stderr, "Null dir name provided\n");
         return NULL;
     }
-    if (!wlist){
-        wlist = _WATCH_LIST;
-        if (!_WATCH_LIST){
-            printf("!!!Yo watch list is null!!!\n");
-        }
-    }
     
     struct w_dir *ptr = NULL;;
-    if (wlist == NULL){
-        /* Adding the directory into watch list.
-         If the IN_ONESHOT value is OR'ed into the event mask at watch addition,
-         the watch is atomically removed during generation of the first event.
-         Subsequent events will not be generated against the file until the watch is added back.
-         ie: watchlist = inotify_add_watch( mon_fd, "/tmp/inotify_test", IN_CREATE | IN_DELETE | IN_MODIFY | IN_ONESHOT);
-         */
-        wlist = create_watch_dir(dpath, mon_fd);
+    if (!wlist){
+        wlist = create_watch_dir(dpath, mon);
         return wlist;
-    }
-    struct w_dir *wdir = _get_dir_by_path(dpath, wlist);
-    if (wdir){
-        printf("Dir already in watchlist:'%s', wd:'%d'\n", wdir->path, wdir->wd);
-        return wdir;
-    }
-    //Create a new item and add it to the end of the list...
-    wdir = create_watch_dir(dpath, mon_fd);
-    if (wdir){
-        if (!wlist){
-            printf("Adding first element to _WATCH_LIST: path:'%s', wd:'%d'\n", wdir->path, wdir->wd);
-            wlist = wdir;
-        } else {
-            printf("Inserting  element to _WATCH_LIST: path:'%s', wd:'%d'\n", wdir->path, wdir->wd);
-            ptr = wlist;
-            while(ptr != NULL) {
-                if (!ptr->next){
-                    ptr->next = wdir;
-                    wdir->list = wlist;
-                    break;
-                }
-                ptr = ptr->next;
-            }
+    }else{
+        wdir = get_dir_by_path(dpath, wlist);
+        if (wdir){
+            printf("Dir already in watchlist:'%s', wd:'%d'\n", wdir->path, wdir->wd);
+            return wdir;
         }
     }
-    debug_show_list(wlist);
+    //Create a new item and add it to the end of the list...
+    wdir = create_watch_dir(dpath, mon);
+    if (wdir){
+        printf("Inserting  element to _WATCH_LIST: path:'%s', wd:'%d'\n", wdir->path, wdir->wd);
+        ptr = wlist;
+        while(ptr != NULL) {
+            if (!ptr->next){
+                ptr->next = wdir;
+                break;
+            }
+            ptr = ptr->next;
+        }
+    }
+    //debug_show_list(wlist);
     return wdir;
 }
 
-
-struct w_dir *add_watch_dir_to_list(char *dpath){
+/*
+struct w_dir *add_watch_dir_to_monitor(char *dpath){
     if (!_WATCH_LIST){
         printf("watch list was null so adding new dir '%s'\n", dpath);
         _WATCH_LIST = create_watch_dir(dpath, mon_fd);
@@ -211,17 +282,23 @@ struct w_dir *add_watch_dir_to_list(char *dpath){
         }
         return _WATCH_LIST;
     }
-    return _add_watch_dir_to_list(dpath, _WATCH_LIST);
+    return _add_watch_dir_to_monitor(dpath, _WATCH_LIST);
 }
+*/
 
-static int _remove_watch_dir(struct w_dir *wdir, struct w_dir *list){
+int remove_watch_dir(struct w_dir *wdir, struct w_dir *list, int allow_base){
     struct w_dir *wlist = list;
     if (!wdir){
         fprintf(stderr, "Null dir provided to remove()\n");
         return -1;
     }
+    if (wdir->wd == wdir->base_wd && !allow_base){
+        fprintf(stderr, "Asked to remove base dir but cant cuz allow_base set to:'%d' \n", allow_base);
+        return -1;
+    }
     if (!wlist){
-        wlist = _WATCH_LIST;
+        fprintf(stderr, "Empty list provided\n");
+        return -1;
     }
     struct w_dir *cur = wlist;
     struct w_dir *last = NULL;
@@ -250,33 +327,39 @@ static int _remove_watch_dir(struct w_dir *wdir, struct w_dir *list){
     debug_show_list(_WATCH_LIST);
     return -1;
 }
+/*
 int remove_watch_dir(struct w_dir *wdir){
     return _remove_watch_dir(wdir, _WATCH_LIST);
 }
+*/
 
-static int _remove_watch_dir_by_path(char *path, struct w_dir *list){
+int remove_watch_dir_by_path(char *path, struct w_dir *list, int allow_base){
     struct w_dir *wlist = list;
     if (!wlist){
-        wlist = _WATCH_LIST;
+        fprintf(stderr, "Empty list provided\n");
+        return -1;
     }
-    struct w_dir *wdir = _get_dir_by_path(path, wlist);
+    struct w_dir *wdir = get_dir_by_path(path, wlist);
     if (!wdir){
         fprintf(stderr, "Could not find watched dir by path:'%s'\n", path ?: "");
         debug_show_list(wlist);
         return -1;
     }
-    return _remove_watch_dir(wdir, wlist);
+    return remove_watch_dir(wdir, wlist, allow_base);
 }
 
+/*
 int remove_watch_dir_by_path(char *path){
     return _remove_watch_dir_by_path(path, _WATCH_LIST);
 }
+*/
+
 
 
 // Must be free'd by caller
-char *create_wd_full_path(int wd, char *name){
+char *create_wd_full_path(int wd, char *name, struct event_mon *mon){
     char *ret = NULL;
-    struct w_dir *wdir = get_dir_by_wd(wd);
+    struct w_dir *wdir = get_dir_by_wd(wd, mon->watch_list);
     if (!wdir){
         fprintf(stderr, "Failed to find wd:'%d' for full path. name:'%s'\n", wd, name ?: "");
         debug_show_list(NULL);
@@ -292,7 +375,7 @@ char *create_wd_full_path(int wd, char *name){
     return ret;
 }
 
-struct w_dir *monitor_watch_dir(char *dpath){
+struct w_dir *monitor_watch_dir(char *dpath, struct event_mon *mon){
     DIR *folder;
     char subdir[512];
     struct dirent *entry;
@@ -302,12 +385,16 @@ struct w_dir *monitor_watch_dir(char *dpath){
         fprintf(stderr, "Null dir name provided\n");
         return NULL;
     }
+    if (!mon){
+        fprintf(stderr, "Null event monitor  provided\n");
+        return NULL;
+    }
     folder = opendir(dpath);
     if(folder == NULL){
         fprintf(stderr, "Unable to read directory:'%s'\n", dpath);
         return NULL;
     }
-    wdir = add_watch_dir_to_list(dpath);
+    wdir = add_watch_dir_to_monitor(dpath, mon);
     if (!wdir) {
         fprintf(stderr, "Error, adding Dir to watchlist:'%s'\n",dpath);
     }else{
@@ -325,7 +412,7 @@ struct w_dir *monitor_watch_dir(char *dpath){
             stat(subdir, &filestat);
             if( S_ISDIR(filestat.st_mode)) {
                 printf("Found sub dir for path:'%s'\n", entry->d_name);
-                if (!monitor_watch_dir(subdir)){
+                if (!monitor_watch_dir(subdir, mon)){
                     fprintf(stderr, "Error adding dir to watchlist:'%s'\n", entry->d_name);
                 };
             }
@@ -407,7 +494,7 @@ static void cleanup(int sig){
         while (ptr != NULL){
             cur = ptr;
             ptr = ptr->next;
-            _remove_watch_dir(cur, _WATCH_LIST);
+            remove_watch_dir(cur, _WATCH_LIST, 1);
         }
     }
     exit(0);
@@ -430,8 +517,8 @@ int main( )
     if ( mon_fd < 0 ) {
         perror( "inotify_init" );
     }
-    
-    struct w_dir *wdir= monitor_watch_dir(BASE_DIR);
+    struct event_mon *mon = create_event_monitor(); 
+    struct w_dir *wdir= monitor_watch_dir(BASE_DIR, mon);
     if (!wdir){
         perror("watch list errror!");
         exit (1);
@@ -447,6 +534,18 @@ int main( )
     }
     cleanup(0);
 }
+
+
+
+
+int start_event_loop(char *base_dir, float interval_sec, char *config_path){
+    
+
+
+
+} 
+
+
 
 static int delete_file(char *fname){
     int ret = -1;
@@ -464,14 +563,22 @@ static int delete_file(char *fname){
     return ret;
 }
 
-static void handle_event(struct inotify_event *event){
+static void handle_event(struct inotify_event *event, void *data)
+    {
+    if (!data){
+        fprintf(stderr, "Null data passed to handle data\n");
+        return;
+    }
     int new_watch = 0;
     char *fname = NULL;
     struct w_dir *wdir = NULL;
+    struct event_mon *mon = data;
+    struct w_dir *wlist = mon->watch_list;
+    
     if (event){
         if (event->len && event->name){
             //fname = event->name;
-            fname = create_wd_full_path(event->wd, event->name);
+            fname = create_wd_full_path(event->wd, event->name, wlist);
         }
         if ( event->mask & IN_CREATE ) {
             if ( event->mask & IN_ISDIR ) {
@@ -479,7 +586,7 @@ static void handle_event(struct inotify_event *event){
                 //snprintf(fpath, sizeof(fpath), "%s/%s", BASE_DIR, fname);
                 //new_watch = inotify_add_watch( mon_fd, fpath, IN_CREATE | IN_DELETE | IN_MODIFY);
                 //Need to store mapping of file/path to watch wd so we can delete it if the dir is detects deleted?
-                monitor_watch_dir(fname);
+                monitor_watch_dir(fname, mon);
             } else {
                 if ( event->mask & IN_MODIFY){
                     printf( "MONITOR: File '%s' was created and modified\n", fname ?: "");
@@ -502,10 +609,10 @@ static void handle_event(struct inotify_event *event){
                  * The dir path will need to be derived from the mapped w_dir in order
                  * to get the wd to remove from inotify mon_fd */
                 if (event->name && strlen(event->name)){
-                    wdir = get_dir_by_wd(event->wd);
+                    wdir = get_dir_by_wd(event->wd, list);
                     if (wdir && wdir->path && strlen(wdir->path)){
                         snprintf(fpath, sizeof(fpath), "%s/%s", wdir->path, event->name);
-                        remove_watch_dir_by_path(fpath);
+                        remove_watch_dir_by_path(fpath, list);
                     }
                 }
             } else {
@@ -523,17 +630,17 @@ static void handle_event(struct inotify_event *event){
 }
 
 
-void read_events_fd(int fd){
+/* Reads events from inotify fd and calls the provided handler func to process them. 
+   ! This read blocks until the change event occurs, use select of poll to make sure
+ * the fd is read ready*/
+void read_events_fd(int events_fd, event_handler handler, void *data){
     int length, i = 0;
     int cookie = 1;
     int x = 0;
-    char buffer[EVENT_BUF_LEN];
+    char buffer[INOT_DEFAULT_EVENT_BUF_LEN];
     struct inotify_event *event = NULL;
-    /* read to determine the event change happens on “/tmp” directory. 
-        This read blocks until the change event occurs, use select of poll to make sure
-        the fd is read ready*/
     
-    length = read(fd, buffer, EVENT_BUF_LEN);
+    length = read(fd, buffer, INOT_DEFAULT_EVENT_BUF_LEN);
     
     /*checking for error*/
     if ( length < 0 ) {
@@ -544,8 +651,8 @@ void read_events_fd(int fd){
         event = ( struct inotify_event * ) &buffer[ i ];
         printf("Got event name:%s, cookie:'%d', wd:'%d', len:%lu\n",
                event->name ?: "", event->cookie, event->wd,  (unsigned long)event->len);
-        handle_event(event);
-        i += EVENT_SIZE + event->len;
+        handler(event, data);
+        i += INOT_EVENT_SIZE + event->len;
     }
     
 }
