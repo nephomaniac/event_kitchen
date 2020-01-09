@@ -7,6 +7,7 @@
 #include <errno.h>
 #include <signal.h> 
 #include <dirent.h>
+#include <pthread.h>
 #include <sys/types.h>
 #include <sys/inotify.h>
 #include <sys/stat.h>
@@ -67,68 +68,116 @@ json_t *json_from_file(char *path){
     return json;
 }
 
-//Create/allocate new event monitor. To be free'd by caller
-struct event_mon *create_event_monitor(char *base_path, 
-                                       char *config_path,
-                                       uint32_t mask, 
-                                       loopctl_func *loopctl,
-                                       event_handler *handler, 
-                                       size_t event_buf_len){
-    struct event_mon *mon = NULL;
-    int ifd = -1;
-    if (!base_path || !strlen(base_path)){
-        fprintf(stderr, "Empty basepath provided to create event monitor\n");
-        return NULL;
+
+
+/* Starts the inotify monitor, adds the base dir to be monitored, as well as i
+ * any recursively discovered sub dirs. 
+ * If start_event_monitor() returns 0 then mon->ifd can be used to read in inotify events. 
+ */
+int start_event_monitor(event_mon *mon){
+    if (!mon){
+        fprintf(stderr, "Null event mon passed to start_event_monitor\n");
+        return -1;
     }
-    size_t buflen = event_buf_len;
-    if (event_buf_len >= INOT_EVENT_SIZE + 16 ){
-        buflen = (event_buf_len * ( INOT_EVENT_SIZE + 16 ));
-    }else{
-        buflen = (size_t) INOT_DEFAULT_EVENT_BUF_LEN; 
+    if (!mon->base_path || !strlen(mon->base_path)){
+        fprintf(stderr, "Empty basepath provided to create event monitor\n");
+        return -1;
+    }
+    if (mon->ifd >= 0){
+        fprintf(stderr, "Empty basepath provided to create event monitor\n");
+        return -1;
     }
     // Create the inotify watch instance
     ifd = inotify_init();
     /*checking for error*/
     if (ifd < 0 ) {
-        fpritnf(stderr, "inotify_init error for path:'%s'\n", base_path);
-        return NULL; 
+        fpritnf(stderr, "inotify_init error for path:'%s'\n", mon->base_path);
+        return -1; 
     }
+    mon->ifd = ifd;
+    // Add the base dir to the monitor, this initializes the watch_list with this w_dir 
+    struct w_dir *wdir = monitor_watch_dir(mon->base_path, mon);
+    if (!wdir){
+        fprintf(stderr, "Error adding base dir to event monitor:'%s'\n", mon->base_path);
+        free(ifd);
+        return -1; 
+    }
+    // Assign the base watch descriptor so there's a starting reference point, 
+    // and we dont accidently delete it later
+    mon->base_wd = wdir-wd;
+    // our list of watched dirs starts with this  base dir...
+    if (!mon->watch_list){
+        mon->watch_list = wdir;
+    }
+    return 0;  
+}
+
+/* Create/allocate new event monitor instance
+ * Monitor will need to be started with start_event_monitor() afterwards 
+ * To be free'd by caller
+ */ 
+struct event_mon *create_event_monitor(const char *base_path, 
+                                       uint32_t mask,
+                                       int recursive, 
+                                       event_handler *handler, 
+                                       size_t event_buf_len){
+    struct event_mon *mon = NULL;
+    int ifd = -1;
+    char *mon_base_path = NULL;
+    if (!base_path || !strlen(base_path)){
+        fprintf(stderr, "Empty basepath provided to create event monitor\n");
+        return NULL;
+    }
+    mon_base_path = strdup(base_path);
+    if (!mon_base_path){
+        fprintf(stderr, "Failed to alloc base_path during create event monitor:'%s'\n", base_path);
+        return NULL;
+    } 
+    // Calc this monitor instance's event buffer size
+    size_t buflen = event_buf_len;
+    if (buflen >= INOT_EVENT_SIZE + 16 ){
+        buflen = (event_buf_len * ( INOT_EVENT_SIZE + 16 ));
+    }else{
+        buflen = (size_t) INOT_DEFAULT_EVENT_BUF_LEN; 
+    }
+    // Allocate the monitor instance + it's event buffer...
     mon = calloc(1, sizeof(struct event_mon) + buflen);
     if (!mon){
         fprintf(stderr, "Error allocating new event monitor!\n");
         close(ifd); 
         return NULL;
     }
-    mon->ifd = ifd;
-    mon->mask;
-    mon->buf_len = event_buf_len;
+    // Init the monitors lock just in case this is used in a threaded app some day...
+    if (pthread_mutex_init(&mon->lock, NULL) != 0) { 
+        fprintf(stderr,"Mutex lock init has failed. Base dir:'%s'\n", base_path);
+        destroy_event_monitor(mon);
+        return NULL; 
+    }
+    // Set the event_monitor instance's starting values. See header for more info... 
+    mon->buf_len = buflen;;
+    mon->ifd = -1;
+    mon->base_wd = -1;
+    mon->config_wd = -1;
+    mon->recursive = 1;
+    mon->mask = mask;
+    mon->recursive = recursive;
     mon->handler = handler;
-    mon->loopctl = loopctl;
-    mon->config_path = config_path;
-    if (do_mon_config(mon)){
-        fprintf(stderr, "Error applying event monitor config. Dir:'%s', config:'%s'\n", base_path, config_path ?: "");
-        close(ifd);
-        free(mon);
-        return NULL;
-    }
-    // Add the base dir to the monitor, this initializes the watch_list with this w_dir 
-    struct w_dir *wdir = monitor_watch_dir(base_path, mon);
-    if (!wdir){
-        fpritnf(stderr, "Error adding base dir to event monitor:'%s'\n", base_path);
-        close(ifd);
-        free(mon);
-        exit (1);
-    }
-    mon->base_wd = wdir-wd;
-    if (!mon->watch_list){
-        mon->watch_list = wdir;
-    }
-    watch_base = wdir->wd;
+    mon->loopctl = NULL;
+    mon->base_path = mon_base_path;
+    mon->jconfig = NULL;
+    mon->thread_id = NULL;
+    mon->watch_list = NULL;
+    
     return mon;
 }
 
-// returns null to allow assignment by caller. 
+/* Destroy and free an event_mon instance. 
+ * returns null to allow assignment by caller. */
 struct event_mon *destroy_event_monitor(event_mon *mon){
+    if (!mon){
+        return NULL;
+    }
+    pthread_mutex_lock(&mon->lock);
     // Close our inotify event fd
     if (mon->ifd >= 0){
         close(mon->ifd);
@@ -145,14 +194,25 @@ struct event_mon *destroy_event_monitor(event_mon *mon){
         while (ptr != NULL){
             cur = ptr;
             ptr = ptr->next;
+            // remove() also frees the w_dir
             remove_watch_dir(cur, mon->watch_list, 1);
         }
     }
+    if (mon->thread_id){
+        pthread_join (mon->thread_id, NULL);
+    } 
+    pthread_mutex_destroy(&mon->lock);
+    if (mon->base_path){
+        free(mon->base_path);
+        mon->base_path = NULL;
+    } 
     free(mon);
     return NULL;
 }
 
-//Create/allocate new watch dir.  To be free'd by caller
+/* Create/allocate new watch dir.  
+ * To be free'd by caller
+ */
 struct w_dir * create_watch_dir(char *dpath, struct event_mon *mon){
     int inotify_fd;
     uint32_t mask;
@@ -375,6 +435,11 @@ char *create_wd_full_path(int wd, char *name, struct event_mon *mon){
     return ret;
 }
 
+
+/* Adds the current dir 
+ *  if mon->recursive flag is set, then subdirectories will automatically be 
+ *  discoverd and added recursively. 
+ */
 struct w_dir *monitor_watch_dir(char *dpath, struct event_mon *mon){
     DIR *folder;
     char subdir[512];
@@ -400,7 +465,10 @@ struct w_dir *monitor_watch_dir(char *dpath, struct event_mon *mon){
     }else{
         printf("Added Dir to watchlist:'%s', wd:'%d'\n", wdir->path, wdir->wd);
     }
-    
+    if (!mon->recursive){
+        // No need to recursively discover and add sub dirs, return this w_dir now...
+        return(wdir);
+    }
     /* Read directory entries */
     entry=readdir(folder);
     while(entry)
@@ -476,70 +544,9 @@ static int has_changed(int fd, int sec, int usec){
     return 0;
 }
 
-static void cleanup(int sig){
-    printf("\nCaught signal '%d', cleaning up and exiting\n", sig);
-    if (mon_fd < 0){
-        return;
-    }
-    /*closing the INOTIFY instance*/
-    close( mon_fd );
-    mon_fd = -1;
-    /*removing the directories from the watch list.*/
-    /**if (watch_base >= 0){
-     inotify_rm_watch( mon_fd, watch_base );
-     }*/
-    struct w_dir *ptr = _WATCH_LIST;
-    struct w_dir *cur = _WATCH_LIST;
-    if (ptr){
-        while (ptr != NULL){
-            cur = ptr;
-            ptr = ptr->next;
-            remove_watch_dir(cur, _WATCH_LIST, 1);
-        }
-    }
-    exit(0);
-}
-
-
-int main( )
-{
-    int ret;
-    int cnt=0;
-    if (!dir_exists(BASE_DIR)){
-        fprintf(stderr, "Base dir does not exist. Try: 'mkdir %s'\n", BASE_DIR);
-        exit(1);
-    }
-    signal(SIGINT, cleanup);
-    /*creating the INOTIFY instance*/
-    mon_fd = inotify_init();
-    
-    /*checking for error*/
-    if ( mon_fd < 0 ) {
-        perror( "inotify_init" );
-    }
-    struct event_mon *mon = create_event_monitor(); 
-    struct w_dir *wdir= monitor_watch_dir(BASE_DIR, mon);
-    if (!wdir){
-        perror("watch list errror!");
-        exit (1);
-    }
-    watch_base = wdir->wd;
-    for (;;){
-        if (has_changed(mon_fd, .5, 0)){
-            printf("-- start loop %d --\n", cnt);
-            read_events_fd(mon_fd);
-            printf("-- end loop %d --\n", cnt);
-            cnt++;
-        }
-    }
-    cleanup(0);
-}
-
-
-
 
 int start_event_loop(char *base_dir, float interval_sec, char *config_path){
-    
+        
 
 
 

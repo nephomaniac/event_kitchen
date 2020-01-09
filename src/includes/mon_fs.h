@@ -29,9 +29,12 @@ struct w_dir {
 struct event_mon {
     int ifd; // inotify instance fd
     int base_wd; // base dir watch descriptor
+    int recursive; // Recursively discover and add sub dirs to monitor 
     int config_wd; // config file watch descriptor
     uint32_t mask; // Default watch mask filter for inotify events
-    const char *config_path; // path to json config file
+    pthread_mutex_t lock; // Monitor Lock
+    pthread_t *thread_id; // Event loop thread for optional threaded loop
+    char *base_path; // path to base directroy to be monitored
     json_t *jconfig; // config json object 
     loopctl_func *loopctl; // call back used when event loop is finished
     event_handler *handler; // call back used to handle individual events
