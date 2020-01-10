@@ -63,7 +63,7 @@ json_t *json_from_file(char *path){
     }
     json = json_load_file(path, 0, &error);
     if(!json) {
-        fprintf(stderr, "Error parsing config:'%s'. Error:'%s'\n", path, error ? (error->text ?: "") : "");
+        fprintf(stderr, "Error parsing config:'%s'. Error:'%s'\n", path, error.text ?: "");
     }
     return json;
 }
@@ -74,7 +74,7 @@ json_t *json_from_file(char *path){
  * any recursively discovered sub dirs. 
  * If start_event_monitor() returns 0 then mon->ifd can be used to read in inotify events. 
  */
-int start_event_monitor(event_mon *mon){
+int start_event_monitor(struct event_mon *mon){
     if (!mon){
         fprintf(stderr, "Null event mon passed to start_event_monitor\n");
         return -1;
@@ -89,10 +89,10 @@ int start_event_monitor(event_mon *mon){
     }
     
     // Create the inotify watch instance
-    ifd = inotify_init();
+    int ifd = inotify_init();
     /*checking for error*/
     if (ifd < 0 ) {
-        fpritnf(stderr, "inotify_init error for path:'%s'\n", mon->base_path);
+        fprintf(stderr, "inotify_init error for path:'%s'\n", mon->base_path);
         return -1; 
     }
     mon->ifd = ifd;
@@ -100,12 +100,13 @@ int start_event_monitor(event_mon *mon){
     struct w_dir *wdir = monitor_watch_dir(mon->base_path, mon);
     if (!wdir){
         fprintf(stderr, "Error adding base dir to event monitor:'%s'\n", mon->base_path);
-        free(ifd);
+        close(mon->ifd);
+        mon->ifd = -1;
         return -1; 
     }
     // Assign the base watch descriptor so there's a starting reference point, 
     // and we dont accidently delete it later
-    mon->base_wd = wdir-wd;
+    mon->base_wd = wdir->wd;
     // our list of watched dirs starts with this  base dir...
     if (!mon->watch_list){
         mon->watch_list = wdir;
@@ -115,6 +116,7 @@ int start_event_monitor(event_mon *mon){
 }
 
 static int _stop_loop_callback(struct event_mon *mon){
+    printf("Stopping loop for mon base dir:'%s'\n", mon->base_path ?: "");
     return 1;
 }
 
@@ -122,7 +124,8 @@ void stop_monitor_loop(struct event_mon *mon){
     mon->loopctl = _stop_loop_callback; 
 }
 
-int start_monitor_loop(event_mon *mon){
+int start_monitor_loop(struct event_mon *mon){
+    int cnt = 0;
     if (!mon || !mon->handler){
        fprintf(stderr, "Err starting mon loop. Mon null:'%s', mon->handler null:'%s'\n", 
                 mon ? "Y":"N", mon->handler ? "Y":"N"); 
@@ -131,10 +134,12 @@ int start_monitor_loop(event_mon *mon){
     for (;;){
         if (!mon->needs_destroy){
             break;
-        else if (mon->loopctl &&  !mon->loopctl(mon)) {
-            break;
-        }else{
-            if (has_changed(mon->ifd, mon->interval, 0)){
+        } else if (mon->loopctl){
+            if (mon->loopctl(mon)) {
+                break;
+            }
+        } else {
+            if (mon_fd_has_events(mon->ifd, mon->interval, 0)){
                 printf("-- start loop %d --\n", cnt);
                 read_events_fd(mon->ifd, mon->handler, mon);
                 printf("-- end loop %d --\n", cnt);
@@ -150,11 +155,7 @@ int start_monitor_loop(event_mon *mon){
  * Monitor will need to be started with start_event_monitor() afterwards 
  * To be free'd by caller
  */ 
-struct event_mon *create_event_monitor(const char *base_path, 
-                                       uint32_t mask,
-                                       int recursive, 
-                                       event_handler *handler, 
-                                       size_t event_buf_len){
+struct event_mon *create_event_monitor(const char *base_path, uint32_t mask, int recursive, event_handler *handler, size_t event_buf_len);
     struct event_mon *mon = NULL;
     int ifd = -1;
     char *mon_base_path = NULL;
@@ -208,7 +209,7 @@ struct event_mon *create_event_monitor(const char *base_path,
 
 /* Destroy and free an event_mon instance. 
  * returns null to allow assignment by caller. */
-struct event_mon *destroy_event_monitor(event_mon *mon){
+struct event_mon *destroy_event_monitor(struct event_mon *mon){
     if (!mon){
         return NULL;
     }
@@ -236,7 +237,7 @@ struct event_mon *destroy_event_monitor(event_mon *mon){
         }
     }
     if (mon->thread_id){
-        pthread_join (mon->thread_id, NULL);
+        pthread_join (*mon->thread_id, NULL);
     } 
     pthread_mutex_destroy(&mon->lock);
     if (mon->base_path){
@@ -335,7 +336,6 @@ struct w_dir *add_watch_dir_to_monitor(char *dpath, struct event_mon *mon){
     }
     struct w_dir *wlist = mon->watch_list;
     struct w_dir *wdir = NULL;
-    int wd;
     if (!dpath || !strlen(dpath)){
         fprintf(stderr, "Null dir name provided\n");
         return NULL;
@@ -548,7 +548,7 @@ int mon_dir_exists(char *dpath){
     return 0;
 }
 
-static int has_changed(int fd, int sec, int usec){
+int mon_fd_has_events(int fd, int sec, int usec){
     struct timeval time;
     fd_set rfds;
     int ret;
@@ -585,7 +585,7 @@ static int has_changed(int fd, int sec, int usec){
 
 
 
-static int delete_file(char *fname){
+int delete_file(char *fname){
     int ret = -1;
     if (!fname || !strlen(fname)){
         perror("empty filename provided to delete_file()\n");
@@ -607,7 +607,6 @@ void event_handler_default(struct inotify_event *event, void *data)
         fprintf(stderr, "Null data passed to handle data\n");
         return;
     }
-    int new_watch = 0;
     char *fname = NULL;
     struct w_dir *wdir = NULL;
     struct event_mon *mon = data;
@@ -616,7 +615,7 @@ void event_handler_default(struct inotify_event *event, void *data)
     if (event){
         if (event->len && event->name){
             // Check our mappings to derive the full path of this file/dir from the event
-            fname = create_wd_full_path(event->wd, event->name, wlist);
+            fname = create_wd_full_path(event->wd, event->name, mon);
         }
         if ( event->mask & IN_CREATE ) {
             if ( event->mask & IN_ISDIR ) {
@@ -643,10 +642,10 @@ void event_handler_default(struct inotify_event *event, void *data)
                  * The dir path will need to be derived from the mapped w_dir in order
                  * to get the wd to remove from inotify mon_fd */
                 if (event->name && strlen(event->name)){
-                    wdir = get_dir_by_wd(event->wd, list);
+                    wdir = get_dir_by_wd(event->wd, wlist);
                     if (wdir && wdir->path && strlen(wdir->path)){
                         snprintf(fpath, sizeof(fpath), "%s/%s", wdir->path, event->name);
-                        remove_watch_dir_by_path(fpath, list);
+                        remove_watch_dir_by_path(fpath, wlist);
                     }
                 }
             } else {

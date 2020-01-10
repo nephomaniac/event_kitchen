@@ -34,15 +34,19 @@ struct event_mon {
     pthread_t *thread_id; // Event loop thread for optional threaded loop
     char *base_path; // path to base directroy to be monitored
     json_t *jconfig; // config json object 
-    loopctl_func *loopctl; // call back used when event loop is finished
-    event_handler *handler; // call back used to handle individual events
+    loopctl_func loopctl; // call back used when event loop is finished
+    event_handler handler; // call back used to handle individual events
     struct w_dir *watch_list; // list mapping watch descriptors to fs paths 
     size_t buf_len; // length of event buffer 
     char event_buffer[1]; // buffer for reading in inotify events 
 };
 
-// read events from inotify fd into buffer for handling. 
-void read_events_fd(int events_fd, struct event_mon *mon);
+struct event_mon *create_event_monitor(const char *base_path, uint32_t mask, int recursive, event_handler handler, size_t event_buf_len);
+
+struct event_mon *destroy_event_monitor(struct event_mon *mon); 
+
+void read_events_fd(int events_fd, event_handler handler, struct event_mon *mon);
+
 struct w_dir *monitor_watch_dir(char *dpath, struct event_mon *mon);
 
 struct w_dir * create_watch_dir(char *dpath, struct event_mon *mon);
@@ -62,7 +66,8 @@ char *create_wd_full_path(int wd, char *name, struct event_mon *mon);
 void debug_show_list(struct w_dir *list);
 
 /* General, Misc, utils */
- int mon_dir_exists(char *dpath); // Check to make sure a dir at dpath exists, is accessible on the fs. 
-
+int mon_dir_exists(char *dpath); // Check to make sure a dir at dpath exists, is accessible on the fs. 
+int mon_fd_has_events(int fd, int sec, int usec);
+int delete_file(char *fname);
 
 
