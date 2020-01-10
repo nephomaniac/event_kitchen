@@ -526,6 +526,7 @@ struct w_dir *monitor_dir(char *dpath, struct event_mon *mon){
     return(wdir);
 }
 
+/* Util func to check if a dir exists and is accesible*/
 int mon_dir_exists(char *dpath){
     
     if (!dpath || !strlen(dpath)){
@@ -546,6 +547,10 @@ int mon_dir_exists(char *dpath){
     return 0;
 }
 
+/* Sample function to be used with an external loop to 
+ * show how select/poll could be used to wait for the inotify fd 
+ * to avoid blocking on read, etc.. 
+ */
 int mon_fd_has_events(int fd, float sec, float usec){
     struct timeval time;
     fd_set rfds;
