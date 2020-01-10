@@ -70,7 +70,7 @@ json_t *json_from_file(char *path){
 
 
 
-/* Starts the inotify monitor, adds the base dir to be monitored, as well as i
+/* Starts the inotify monitor, adds the base dir to be monitored, as well as 
  * any recursively discovered sub dirs. 
  * If start_event_monitor() returns 0 then mon->ifd can be used to read in inotify events. 
  */
@@ -84,9 +84,10 @@ int start_event_monitor(event_mon *mon){
         return -1;
     }
     if (mon->ifd >= 0){
-        fprintf(stderr, "Empty basepath provided to create event monitor\n");
+        fprintf(stderr, "Monitor inotify instance already assigned for mon:'%s'\n", mon->base_path);
         return -1;
     }
+    
     // Create the inotify watch instance
     ifd = inotify_init();
     /*checking for error*/
@@ -109,8 +110,41 @@ int start_event_monitor(event_mon *mon){
     if (!mon->watch_list){
         mon->watch_list = wdir;
     }
+    
     return 0;  
 }
+
+static int _stop_loop_callback(struct event_mon *mon){
+    return 1;
+}
+
+void stop_monitor_loop(struct event_mon *mon){
+    mon->loopctl = _stop_loop_callback; 
+}
+
+int start_monitor_loop(event_mon *mon){
+    if (!mon || !mon->handler){
+       fprintf(stderr, "Err starting mon loop. Mon null:'%s', mon->handler null:'%s'\n", 
+                mon ? "Y":"N", mon->handler ? "Y":"N"); 
+        return -1;
+    }
+    for (;;){
+        if (!mon->needs_destroy){
+            break;
+        else if (mon->loopctl &&  !mon->loopctl(mon)) {
+            break;
+        }else{
+            if (has_changed(mon->ifd, mon->interval, 0)){
+                printf("-- start loop %d --\n", cnt);
+                read_events_fd(mon->ifd, mon->handler, mon);
+                printf("-- end loop %d --\n", cnt);
+                cnt++;
+            }
+        }  
+    }  
+    return 0;
+}
+
 
 /* Create/allocate new event monitor instance
  * Monitor will need to be started with start_event_monitor() afterwards 
@@ -159,7 +193,8 @@ struct event_mon *create_event_monitor(const char *base_path,
     mon->base_wd = -1;
     mon->config_wd = -1;
     mon->recursive = 1;
-    mon->mask = mask;
+    mon->interval = .5;
+    mon->mask = mask || (IN_CREATE | IN_DELETE | IN_MODIFY);
     mon->recursive = recursive;
     mon->handler = handler;
     mon->loopctl = NULL;
@@ -178,6 +213,8 @@ struct event_mon *destroy_event_monitor(event_mon *mon){
         return NULL;
     }
     pthread_mutex_lock(&mon->lock);
+    mon->needs_destroy = 1;
+    stop_monitor_loop(mon);
     // Close our inotify event fd
     if (mon->ifd >= 0){
         close(mon->ifd);
@@ -491,7 +528,7 @@ struct w_dir *monitor_watch_dir(char *dpath, struct event_mon *mon){
     return(wdir);
 }
 
-int dir_exists(char *dpath){
+int mon_dir_exists(char *dpath){
     
     if (!dpath || !strlen(dpath)){
         return 0;
@@ -545,12 +582,6 @@ static int has_changed(int fd, int sec, int usec){
 }
 
 
-int start_event_loop(char *base_dir, float interval_sec, char *config_path){
-        
-
-
-
-} 
 
 
 
@@ -570,7 +601,7 @@ static int delete_file(char *fname){
     return ret;
 }
 
-static void handle_event(struct inotify_event *event, void *data)
+void event_handler_default(struct inotify_event *event, void *data)
     {
     if (!data){
         fprintf(stderr, "Null data passed to handle data\n");
@@ -584,27 +615,23 @@ static void handle_event(struct inotify_event *event, void *data)
     
     if (event){
         if (event->len && event->name){
-            //fname = event->name;
+            // Check our mappings to derive the full path of this file/dir from the event
             fname = create_wd_full_path(event->wd, event->name, wlist);
         }
         if ( event->mask & IN_CREATE ) {
             if ( event->mask & IN_ISDIR ) {
                 printf( "MONITOR: New directory '%s' created.\n", fname ?: "");
-                //snprintf(fpath, sizeof(fpath), "%s/%s", BASE_DIR, fname);
-                //new_watch = inotify_add_watch( mon_fd, fpath, IN_CREATE | IN_DELETE | IN_MODIFY);
-                //Need to store mapping of file/path to watch wd so we can delete it if the dir is detects deleted?
-                monitor_watch_dir(fname, mon);
+                // If recursive is set, automatically add this new subdir 
+                if (mon->recursive){
+                    monitor_watch_dir(fname, mon);
+                }
             } else {
                 if ( event->mask & IN_MODIFY){
                     printf( "MONITOR: File '%s' was created and modified\n", fname ?: "");
-                    if (fname){
-                        delete_file(fname);
-                        free(fname);
-                    }
                     return;
                 }
                 if (event->cookie){
-                    printf( "MONITOR: New file '%s' created, use follow up event instead.\n", fname ?: "" );
+                    printf( "MONITOR: New file '%s' created. Cookie set so heads up on paired event:'%lu'\n", fname ?: "", (unsigned long) event->cookie);
                 }else{
                     printf( "MONITOR: New file '%s' created.\n", fname ?: "" );
                 }
@@ -627,7 +654,6 @@ static void handle_event(struct inotify_event *event, void *data)
             }
         }else if ( event->mask & IN_MODIFY){
             printf( "MONITOR: File '%s' was modified\n", fname ?: "");
-            delete_file(fname);
         }
     }
     if (fname){

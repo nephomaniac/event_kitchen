@@ -3,17 +3,13 @@
 #define BASE_DIR "/tmp/inotify_test"
 
 
-enum loop_status {
-    start,
-    end
-};
 struct w_dir;
 struct event_mon;
 
 //Call back to handle detected events. 
 typedef void (*event_handler)(struct inotify_event *event, void *data);
-//Call back to control event loop. Return value is interval in seconds. Negative value ends the loop.   
-typedef float (*loopctl_func)(struct event_mon *mon, enum loop_status status, void *data);
+// Call back to control event loop. Return 0 to continue, else stop the loop
+typedef int (*loopctl_func)(struct event_mon *mon);
 
 //Stucture to map inotify watch descriptors to fs paths
 struct w_dir {
@@ -30,7 +26,9 @@ struct event_mon {
     int ifd; // inotify instance fd
     int base_wd; // base dir watch descriptor
     int recursive; // Recursively discover and add sub dirs to monitor 
+    int needs_destroy; // flag to indicate this mon is in the destroy process
     int config_wd; // config file watch descriptor
+    float interval; // inotify monitor select/poll timeout in seconds
     uint32_t mask; // Default watch mask filter for inotify events
     pthread_mutex_t lock; // Monitor Lock
     pthread_t *thread_id; // Event loop thread for optional threaded loop
@@ -47,25 +45,24 @@ struct event_mon {
 void read_events_fd(int events_fd, struct event_mon *mon);
 struct w_dir *monitor_watch_dir(char *dpath, struct event_mon *mon);
 
-
-//Create/allocate new w_dir struct to manage + map inotify watch descriptior to fs path
 struct w_dir * create_watch_dir(char *dpath, struct event_mon *mon);
 
 struct w_dir *get_dir_by_wd(int wd, struct w_dir *list);
-//struct w_dir *get_dir_by_wd(int wd);
 
 struct w_dir *get_dir_by_path(char *path, struct w_dir *list);
-//struct w_dir *get_dir_by_path(char *path);
 
 struct w_dir *add_watch_dir_to_monitor(char *dpath, struct event_mon *mon);
-//struct w_dir *add_watch_dir_to_list(char *dpath);
 
 int remove_watch_dir(struct w_dir *wdir, struct w_dir *list, int allow_base);
-//int remove_watch_dir(struct w_dir *wdir);
 
 int remove_watch_dir_by_path(char *path, struct w_dir *list, int allow_base);
-//int remove_watch_dir_by_path(char *path);
 
 char *create_wd_full_path(int wd, char *name, struct event_mon *mon);
+
 void debug_show_list(struct w_dir *list);
+
+/* General, Misc, utils */
+ int mon_dir_exists(char *dpath); // Check to make sure a dir at dpath exists, is accessible on the fs. 
+
+
 
