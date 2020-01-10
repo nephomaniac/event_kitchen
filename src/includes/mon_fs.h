@@ -19,6 +19,7 @@ typedef int (*loopctl_func)(struct event_mon *mon);
 //Stucture to map inotify watch descriptors to fs paths
 struct w_dir {
     int wd; // inotify watch descriptor
+    uint32_t mask; // inotify mask to filter events
     int ifd; // inotify instance fd
     int base_wd; // base watch descriptor
     struct event_mon *evt_mon; // parent event monitor
@@ -79,7 +80,7 @@ void debug_show_list(struct w_dir *list);
 
 /* General, Misc, utils */
 int mon_dir_exists(char *dpath); // Check to make sure a dir at dpath exists, is accessible on the fs. 
-int mon_fd_has_events(int fd, int sec, int usec);
+int mon_fd_has_events(int fd, float sec, float usec);
 int delete_file(char *fpath);
 int event_handler_default(struct inotify_event *event, void *data);
 
