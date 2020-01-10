@@ -45,13 +45,16 @@ void debug_show_list(struct w_dir *list){
     struct w_dir *ptr = wlist;
     fprintf(stderr, "---- WATCHED DIRS:\n");
     while(ptr != NULL) {
-        fprintf(stderr, "WATCH_LIST[%d] = PATH:'%s', WD:'%d'\n", cnt,  ptr->path, ptr->wd);
+        fprintf(stderr, "WATCH_LIST[%d] = PATH:'%s', WD:'%d', mask:'0x%lx', ptr:'%p', next:'%p'\n", 
+            cnt,  ptr->path, ptr->wd, (unsigned long)ptr->mask, ptr, ptr->next);
         ptr = ptr->next;
         cnt++;
     }
     fprintf(stderr, "---- END WATCHED DIRS -----\n");
     return;
 }
+
+
 
 json_t *json_from_file(char *path){
     json_t *json = NULL;
@@ -96,7 +99,7 @@ int monitor_init(struct event_mon *mon){
     }
     mon->ifd = ifd;
     // Add the base dir to the monitor, this initializes the watch_list with this w_dir 
-    struct w_dir *wdir = monitor_watch_dir(mon->base_path, mon);
+    struct w_dir *wdir = monitor_dir(mon->base_path, mon);
     if (!wdir){
         fprintf(stderr, "Error adding base dir to event monitor:'%s'\n", mon->base_path);
         close(mon->ifd);
@@ -120,6 +123,7 @@ static int _stop_loop_callback(struct event_mon *mon){
 }
 
 void stop_monitor_loop(struct event_mon *mon){
+    printf("Stopping loop, setting loopctl\n");
     mon->loopctl = _stop_loop_callback; 
 }
 
@@ -130,6 +134,8 @@ int start_monitor_loop(struct event_mon *mon){
                 mon ? "Y":"N", mon->handler ? "Y":"N"); 
         return -1;
     }
+    printf("Start Monitor Loop with following dirs...\n");
+    debug_show_list(mon->watch_list);
     for (;;){
         if (mon->needs_destroy){
             printf("monitor marked as needs_destroy ending loop\n");
@@ -145,6 +151,9 @@ int start_monitor_loop(struct event_mon *mon){
                 read_events_fd(mon->ifd, mon->event_buffer, mon->buf_len, mon->handler, mon);
                 printf("-- end loop %d --\n", cnt);
                 cnt++;
+            }else{
+                //printf("NO EVENTS DETECTED during interval\n");
+                //debug_show_list(mon->watch_list);
             }
         }  
     }  
@@ -199,8 +208,12 @@ struct event_mon *create_event_monitor(char *base_path,
     mon->base_wd = -1;
     mon->config_wd = -1;
     mon->recursive = 1;
-    mon->interval = .5;
-    mon->mask = mask || (IN_CREATE | IN_DELETE | IN_MODIFY);
+    mon->interval = 1;
+    if (mask){
+        mon->mask = mask;
+    }else{
+        mon->mask = IN_CREATE | IN_DELETE | IN_MODIFY;
+    }
     mon->recursive = recursive;
     mon->handler = handler;
     mon->loopctl = NULL;
@@ -216,8 +229,10 @@ struct event_mon *create_event_monitor(char *base_path,
  * returns null to allow assignment by caller. */
 struct event_mon *destroy_event_monitor(struct event_mon *mon){
     if (!mon){
+        fprintf(stderr, "destroy_event_monitor provided a null monitor\n");
         return NULL;
     }
+    printf("Destroying mon path:'%s', list:'%p'\n", mon->base_path ?:"", mon->watch_list ?: 0); 
     pthread_mutex_lock(&mon->lock);
     mon->needs_destroy = 1;
     stop_monitor_loop(mon);
@@ -229,17 +244,17 @@ struct event_mon *destroy_event_monitor(struct event_mon *mon){
     if (mon->jconfig){
         json_decref(mon->jconfig);
     }
+    printf("Destroy removing the following watched dirs...\n"); 
+    debug_show_list(mon->watch_list);
    
     // Remove and free all the watch dirs 
     struct w_dir *ptr = mon->watch_list;
     struct w_dir *cur = mon->watch_list;
-    if (ptr){
-        while (ptr != NULL){
-            cur = ptr;
-            ptr = ptr->next;
-            // remove() also frees the w_dir
-            remove_watch_dir(cur, mon->watch_list, 1);
-        }
+    while (ptr != NULL){
+        cur = ptr;
+        ptr = ptr->next;
+        // remove() also frees the w_dir
+        remove_watch_dir(cur, mon->watch_list, 1);
     }
     if (mon->thread_id){
         pthread_join (*mon->thread_id, NULL);
@@ -282,6 +297,7 @@ struct w_dir * create_watch_dir(char *dpath, struct event_mon *mon){
     struct w_dir *newd = calloc(1, sizeof(struct w_dir) + strlen(dpath));
     if (newd != NULL){
         newd->wd = wd;
+        newd->mask = mask;
         newd->ifd = inotify_fd;
         newd->evt_mon = mon;
         newd->next = NULL;
@@ -290,6 +306,7 @@ struct w_dir * create_watch_dir(char *dpath, struct event_mon *mon){
     return newd;
 }
 
+/* Fetch w_dir with matchng watch descriptor attribute from provided w_dir list */
 struct w_dir * get_dir_by_wd(int wd, struct w_dir *list){
     struct w_dir *wlist = list;
     if (!wlist){
@@ -305,13 +322,7 @@ struct w_dir * get_dir_by_wd(int wd, struct w_dir *list){
     return NULL;
 }
 
-/*
-struct w_dir *get_dir_by_wd(int wd){
-    return _get_dir_by_wd(wd, _WATCH_LIST);
-}
-*/
-
-
+/* Fetch w_dir with matching 'path' from provided w_dir list */
 struct w_dir * get_dir_by_path(char *path, struct w_dir *list){
     struct w_dir *wlist = list;
     if (!wlist){
@@ -339,7 +350,6 @@ struct w_dir *add_watch_dir_to_monitor(char *dpath, struct event_mon *mon){
         fprintf(stderr, "Was provided null event_mon\n");
         return NULL;
     }
-    struct w_dir *wlist = mon->watch_list;
     struct w_dir *wdir = NULL;
     if (!dpath || !strlen(dpath)){
         fprintf(stderr, "Null dir name provided\n");
@@ -347,11 +357,13 @@ struct w_dir *add_watch_dir_to_monitor(char *dpath, struct event_mon *mon){
     }
     
     struct w_dir *ptr = NULL;;
-    if (!wlist){
-        wlist = create_watch_dir(dpath, mon);
-        return wlist;
+    if (!mon->watch_list){
+        //printf("Adding first item in list! ('%s')\n", dpath);
+        mon->watch_list = create_watch_dir(dpath, mon);
+        //debug_show_list(mon->watch_list);
+        return mon->watch_list;
     }else{
-        wdir = get_dir_by_path(dpath, wlist);
+        wdir = get_dir_by_path(dpath, mon->watch_list);
         if (wdir){
             printf("Dir already in watchlist:'%s', wd:'%d'\n", wdir->path, wdir->wd);
             return wdir;
@@ -359,9 +371,11 @@ struct w_dir *add_watch_dir_to_monitor(char *dpath, struct event_mon *mon){
     }
     //Create a new item and add it to the end of the list...
     wdir = create_watch_dir(dpath, mon);
-    if (wdir){
+    if (!wdir){
+        fprintf(stderr, "Failed to creat new wdir for path:'%s'\n", dpath);
+    }else{
         printf("Inserting  element to _WATCH_LIST: path:'%s', wd:'%d'\n", wdir->path, wdir->wd);
-        ptr = wlist;
+        ptr = mon->watch_list;
         while(ptr != NULL) {
             if (!ptr->next){
                 ptr->next = wdir;
@@ -370,24 +384,11 @@ struct w_dir *add_watch_dir_to_monitor(char *dpath, struct event_mon *mon){
             ptr = ptr->next;
         }
     }
-    //debug_show_list(wlist);
+    //debug_show_list(mon->watch_list);
     return wdir;
 }
 
-/*
-struct w_dir *add_watch_dir_to_monitor(char *dpath){
-    if (!_WATCH_LIST){
-        printf("watch list was null so adding new dir '%s'\n", dpath);
-        _WATCH_LIST = create_watch_dir(dpath, mon_fd);
-        if (!_WATCH_LIST){
-            printf("wtf watchlist is still null?\n");
-        }
-        return _WATCH_LIST;
-    }
-    return _add_watch_dir_to_monitor(dpath, _WATCH_LIST);
-}
-*/
-
+/*'if' found in list, removes w_dir from list, free's w_dir */ 
 int remove_watch_dir(struct w_dir *wdir, struct w_dir *list, int allow_base){
     struct w_dir *wlist = list;
     if (!wdir){
@@ -404,7 +405,8 @@ int remove_watch_dir(struct w_dir *wdir, struct w_dir *list, int allow_base){
     }
     struct w_dir *cur = wlist;
     struct w_dir *last = NULL;
-    printf("Attempting to remove wdir->path:'%s', ptr:'%p'\n", wdir->path ?: "", wdir);
+    printf("Attempting to remove wdir->path:'%s', wdir:'%p', next:'%p', list:'%p'\n",
+                 wdir->path ?: "", wdir, wdir->next ?: 0, wlist ?: 0);
     int cnt = 0;
     while(cur != NULL) {
         if (cur == wdir){
@@ -429,11 +431,6 @@ int remove_watch_dir(struct w_dir *wdir, struct w_dir *list, int allow_base){
     debug_show_list(_WATCH_LIST);
     return -1;
 }
-/*
-int remove_watch_dir(struct w_dir *wdir){
-    return _remove_watch_dir(wdir, _WATCH_LIST);
-}
-*/
 
 int remove_watch_dir_by_path(char *path, struct w_dir *list, int allow_base){
     struct w_dir *wlist = list;
@@ -450,15 +447,11 @@ int remove_watch_dir_by_path(char *path, struct w_dir *list, int allow_base){
     return remove_watch_dir(wdir, wlist, allow_base);
 }
 
-/*
-int remove_watch_dir_by_path(char *path){
-    return _remove_watch_dir_by_path(path, _WATCH_LIST);
-}
-*/
 
-
-
-// Must be free'd by caller
+/* Finds parent directory using w_dir list mappings to build current event's
+ * full path. 
+ * Returned buffer must be free'd later by caller
+ */ 
 char *create_wd_full_path(int wd, char *name, struct event_mon *mon){
     char *ret = NULL;
     struct w_dir *wdir = get_dir_by_wd(wd, mon->watch_list);
@@ -482,7 +475,7 @@ char *create_wd_full_path(int wd, char *name, struct event_mon *mon){
  *  if mon->recursive flag is set, then subdirectories will automatically be 
  *  discoverd and added recursively. 
  */
-struct w_dir *monitor_watch_dir(char *dpath, struct event_mon *mon){
+struct w_dir *monitor_dir(char *dpath, struct event_mon *mon){
     DIR *folder;
     char subdir[512];
     struct dirent *entry;
@@ -522,7 +515,7 @@ struct w_dir *monitor_watch_dir(char *dpath, struct event_mon *mon){
             stat(subdir, &filestat);
             if( S_ISDIR(filestat.st_mode)) {
                 printf("Found sub dir for path:'%s'\n", entry->d_name);
-                if (!monitor_watch_dir(subdir, mon)){
+                if (!monitor_dir(subdir, mon)){
                     fprintf(stderr, "Error adding dir to watchlist:'%s'\n", entry->d_name);
                 };
             }
@@ -553,12 +546,16 @@ int mon_dir_exists(char *dpath){
     return 0;
 }
 
-int mon_fd_has_events(int fd, int sec, int usec){
+int mon_fd_has_events(int fd, float sec, float usec){
     struct timeval time;
     fd_set rfds;
     int ret;
     
     /* timeout after five seconds */
+    if (sec <= 0 && usec <= 0){
+        fprintf(stderr, "Warning invalid interval. Sec:'%f' Usec:'%f'. Setting to 1 sec \n", sec, usec);
+        sec = 1;
+    }
     time.tv_sec = sec;
     time.tv_usec = usec;
     
@@ -626,7 +623,7 @@ int event_handler_default(struct inotify_event *event, void *data)
                 printf( "MONITOR: New directory '%s' created.\n", fname ?: "");
                 // If recursive is set, automatically add this new subdir 
                 if (mon->recursive){
-                    monitor_watch_dir(fname, mon);
+                    monitor_dir(fname, mon);
                 }
             } else {
                 if ( event->mask & IN_MODIFY){
@@ -692,8 +689,7 @@ size_t read_events_fd(int events_fd, char *buffer, size_t buflen, event_handler 
     /*actually read return the list of change events happens. Here, read the change event one by one and process it accordingly.*/
     while ( i < length ) {
         event = ( struct inotify_event * ) &buffer[ i ];
-        printf("Got event name:%s, cookie:'%d', wd:'%d', len:%lu\n",
-               event->name ?: "", event->cookie, event->wd,  (unsigned long)event->len);
+        print_event(event);
         if (handler(event, data)){
             break;
         }
@@ -701,4 +697,180 @@ size_t read_events_fd(int events_fd, char *buffer, size_t buflen, event_handler 
     }
     return length;
     
+}
+
+
+/* print mask attributes to provided buffer. Return length written. */
+void print_event(struct inotify_event *event){
+    uint32_t mask = event->mask;
+    char buf[256];
+    char *ptr = buf;
+    size_t buflen = sizeof(buf);
+    printf("---------------------------------------------------\n");
+    if (!event){
+        printf("Passed null event to print!\n");
+        printf("---------------------------------------------------\n");
+        return;
+    }
+    printf("\tEVENT: name:'%s'\n", event->name ?: "");
+    printf("\tEVENT: mask:'0x%lx', cookie:'%d', wd:'%d', len:%lu\n",
+               (unsigned long)event->mask, event->cookie, event->wd,  (unsigned long)event->len);
+    if (mask == 0){
+        printf("\tMASK: NONE\n");   
+        printf("---------------------------------------------------\n");
+        return; 
+    }
+    if (mask & IN_ACCESS){
+         ptr += snprintf(ptr, (buflen-strlen(buf)), "%s,", "IN_ACCESS");
+         if (strlen(buf)+1 >= buflen){
+              return; //strlen(buf);
+         }
+    }
+    if (mask & IN_MODIFY){
+         ptr += snprintf(ptr, (buflen-strlen(buf)), "%s,", "IN_MODIFY");
+         if (strlen(buf)+1 >= buflen){
+              return; //strlen(buf);
+         }
+    }
+    if (mask & IN_ATTRIB){
+         ptr += snprintf(ptr, (buflen-strlen(buf)), "%s,", "IN_ATTRIB");
+         if (strlen(buf)+1 >= buflen){
+              return; //strlen(buf);
+         }
+    }
+    if (mask & IN_CLOSE_WRITE){
+         ptr += snprintf(ptr, (buflen-strlen(buf)), "%s,", "IN_CLOSE_WRITE");
+         if (strlen(buf)+1 >= buflen){
+              return; //strlen(buf);
+         }
+    }
+    if (mask & IN_CLOSE_NOWRITE){
+         ptr += snprintf(ptr, (buflen-strlen(buf)), "%s,", "IN_CLOSE_NOWRITE");
+         if (strlen(buf)+1 >= buflen){
+              return; //strlen(buf);
+         }
+    }
+    if (mask & IN_CLOSE){
+         ptr += snprintf(ptr, (buflen-strlen(buf)), "%s,", "IN_CLOSE");
+         if (strlen(buf)+1 >= buflen){
+              return; //strlen(buf);
+         }
+    }
+    if (mask & IN_OPEN){
+         ptr += snprintf(ptr, (buflen-strlen(buf)), "%s,", "IN_OPEN");
+         if (strlen(buf)+1 >= buflen){
+              return; //strlen(buf);
+         }
+    }
+    if (mask & IN_MOVED_FROM){
+         ptr += snprintf(ptr, (buflen-strlen(buf)), "%s,", "IN_MOVED_FROM");
+         if (strlen(buf)+1 >= buflen){
+              return; //strlen(buf);
+         }
+    }
+    if (mask & IN_MOVED_TO){
+         ptr += snprintf(ptr, (buflen-strlen(buf)), "%s,", "IN_MOVED_TO");
+         if (strlen(buf)+1 >= buflen){
+              return; //strlen(buf);
+         }
+    }
+    if (mask & IN_MOVE){
+         ptr += snprintf(ptr, (buflen-strlen(buf)), "%s,", "IN_MOVE");
+         if (strlen(buf)+1 >= buflen){
+              return; //strlen(buf);
+         }
+    }
+    if (mask & IN_CREATE){
+         ptr += snprintf(ptr, (buflen-strlen(buf)), "%s,", "IN_CREATE");
+         if (strlen(buf)+1 >= buflen){
+              return; //strlen(buf);
+         }
+    }
+    if (mask & IN_DELETE){
+         ptr += snprintf(ptr, (buflen-strlen(buf)), "%s,", "IN_DELETE");
+         if (strlen(buf)+1 >= buflen){
+              return; //strlen(buf);
+         }
+    }
+    if (mask & IN_DELETE_SELF){
+         ptr += snprintf(ptr, (buflen-strlen(buf)), "%s,", "IN_DELETE_SELF");
+         if (strlen(buf)+1 >= buflen){
+              return; //strlen(buf);
+         }
+    }
+    if (mask & IN_MOVE_SELF){
+         ptr += snprintf(ptr, (buflen-strlen(buf)), "%s,", "IN_MOVE_SELF");
+         if (strlen(buf)+1 >= buflen){
+              return; //strlen(buf);
+         }
+    }
+    if (mask & IN_UNMOUNT){
+         ptr += snprintf(ptr, (buflen-strlen(buf)), "%s,", "IN_UNMOUNT");
+         if (strlen(buf)+1 >= buflen){
+              return; //strlen(buf);
+         }
+    }
+    if (mask & IN_Q_OVERFLOW){
+         ptr += snprintf(ptr, (buflen-strlen(buf)), "%s,", "IN_Q_OVERFLOW");
+         if (strlen(buf)+1 >= buflen){
+              return; //strlen(buf);
+         }
+    }
+    if (mask & IN_IGNORED){
+         ptr += snprintf(ptr, (buflen-strlen(buf)), "%s,", "IN_IGNORED");
+         if (strlen(buf)+1 >= buflen){
+              return; //strlen(buf);
+         }
+    }
+    if (mask & IN_CLOSE){
+         ptr += snprintf(ptr, (buflen-strlen(buf)), "%s,", "IN_CLOSE");
+         if (strlen(buf)+1 >= buflen){
+              return; //strlen(buf);
+         }
+    }
+    if (mask & IN_MOVE){
+         ptr += snprintf(ptr, (buflen-strlen(buf)), "%s,", "IN_MOVE");
+         if (strlen(buf)+1 >= buflen){
+              return; //strlen(buf);
+         }
+    }
+    if (mask & IN_ONLYDIR){
+         ptr += snprintf(ptr, (buflen-strlen(buf)), "%s,", "IN_ONLYDIR");
+         if (strlen(buf)+1 >= buflen){
+              return; //strlen(buf);
+         }
+    }
+    if (mask & IN_DONT_FOLLOW){
+         ptr += snprintf(ptr, (buflen-strlen(buf)), "%s,", "IN_DONT_FOLLOW");
+         if (strlen(buf)+1 >= buflen){
+              return; //strlen(buf);
+         }
+    }
+    if (mask & IN_MASK_ADD){
+         ptr += snprintf(ptr, (buflen-strlen(buf)), "%s,", "IN_MASK_ADD");
+         if (strlen(buf)+1 >= buflen){
+              return; //strlen(buf);
+         }
+    }
+    if (mask & IN_ISDIR){
+         ptr += snprintf(ptr, (buflen-strlen(buf)), "%s,", "IN_ISDIR");
+         if (strlen(buf)+1 >= buflen){
+              return; //strlen(buf);
+         }
+    }
+    if (mask & IN_ONESHOT){
+         ptr += snprintf(ptr, (buflen-strlen(buf)), "%s,", "IN_ONESHOT");
+         if (strlen(buf)+1 >= buflen){
+              return; //strlen(buf);
+         }
+    }
+    /*if (mask & IN_ALL_EVENTS){
+         ptr += snprintf(ptr, (buflen-strlen(buf)), "%s,", "IN_ALL_EVENTS");
+         if (strlen(buf)+1 >= buflen){
+              return; //strlen(buf);
+         }
+    }*/
+    printf("\tMASK: %s\n", buf);   
+    printf("---------------------------------------------------\n");
+    return;
 }
