@@ -131,10 +131,12 @@ int start_monitor_loop(struct event_mon *mon){
         return -1;
     }
     for (;;){
-        if (!mon->needs_destroy){
+        if (mon->needs_destroy){
+            printf("monitor marked as needs_destroy ending loop\n");
             break;
         } else if (mon->loopctl){
-            if (mon->loopctl(mon)) {
+            if (mon->loopctl(mon) != 0) {
+                printf("loopctl exited non-zero, ending loop\n");
                 break;
             }
         } else {
