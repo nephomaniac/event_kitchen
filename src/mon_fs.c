@@ -5,7 +5,6 @@
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
-#include <signal.h> 
 #include <dirent.h>
 #include <pthread.h>
 #include <sys/types.h>
@@ -72,11 +71,11 @@ json_t *json_from_file(char *path){
 
 /* Starts the inotify monitor, adds the base dir to be monitored, as well as 
  * any recursively discovered sub dirs. 
- * If start_event_monitor() returns 0 then mon->ifd can be used to read in inotify events. 
+ * If monitor_init() returns 0 then mon->ifd can be used to read in inotify events. 
  */
-int start_event_monitor(struct event_mon *mon){
+int monitor_init(struct event_mon *mon){
     if (!mon){
-        fprintf(stderr, "Null event mon passed to start_event_monitor\n");
+        fprintf(stderr, "Null event mon passed to monitor_init\n");
         return -1;
     }
     if (!mon->base_path || !strlen(mon->base_path)){
@@ -141,7 +140,7 @@ int start_monitor_loop(struct event_mon *mon){
         } else {
             if (mon_fd_has_events(mon->ifd, mon->interval, 0)){
                 printf("-- start loop %d --\n", cnt);
-                read_events_fd(mon->ifd, mon->handler, mon);
+                read_events_fd(mon->ifd, mon->event_buffer, mon->buf_len, mon->handler, mon);
                 printf("-- end loop %d --\n", cnt);
                 cnt++;
             }
@@ -152,10 +151,14 @@ int start_monitor_loop(struct event_mon *mon){
 
 
 /* Create/allocate new event monitor instance
- * Monitor will need to be started with start_event_monitor() afterwards 
+ * Monitor will need to be started with monitor_init() afterwards 
  * To be free'd by caller
  */ 
-struct event_mon *create_event_monitor(const char *base_path, uint32_t mask, int recursive, event_handler *handler, size_t event_buf_len);
+struct event_mon *create_event_monitor(char *base_path, 
+                                       uint32_t mask,
+                                       int recursive, 
+                                       event_handler handler, 
+                                       size_t event_buf_len){
     struct event_mon *mon = NULL;
     int ifd = -1;
     char *mon_base_path = NULL;
@@ -185,7 +188,7 @@ struct event_mon *create_event_monitor(const char *base_path, uint32_t mask, int
     // Init the monitors lock just in case this is used in a threaded app some day...
     if (pthread_mutex_init(&mon->lock, NULL) != 0) { 
         fprintf(stderr,"Mutex lock init has failed. Base dir:'%s'\n", base_path);
-        destroy_event_monitor(mon);
+        mon = destroy_event_monitor(mon);
         return NULL; 
     }
     // Set the event_monitor instance's starting values. See header for more info... 
@@ -585,27 +588,26 @@ int mon_fd_has_events(int fd, int sec, int usec){
 
 
 
-int delete_file(char *fname){
+int delete_file(char *fpath){
     int ret = -1;
-    if (!fname || !strlen(fname)){
-        perror("empty filename provided to delete_file()\n");
+    if (!fpath || !strlen(fpath)){
+        fprintf(stderr, "empty filename provided to delete_file()\n");
         return -1;
     }
-    snprintf(fpath,sizeof(fpath),"%s/%s", BASE_DIR, fname);
     if (remove(fpath) == 0){
         printf("Automatically deleted file:'%s'\n", fpath);
         ret = 0;
     } else {
-        perror("Failed, delete_file()\n");
+        fprintf(stderr, "Failed, delete_file()\n");
     }
     return ret;
 }
 
-void event_handler_default(struct inotify_event *event, void *data)
+int event_handler_default(struct inotify_event *event, void *data)
     {
     if (!data){
         fprintf(stderr, "Null data passed to handle data\n");
-        return;
+        return -1;
     }
     char *fname = NULL;
     struct w_dir *wdir = NULL;
@@ -627,7 +629,7 @@ void event_handler_default(struct inotify_event *event, void *data)
             } else {
                 if ( event->mask & IN_MODIFY){
                     printf( "MONITOR: File '%s' was created and modified\n", fname ?: "");
-                    return;
+                    return 0;
                 }
                 if (event->cookie){
                     printf( "MONITOR: New file '%s' created. Cookie set so heads up on paired event:'%lu'\n", fname ?: "", (unsigned long) event->cookie);
@@ -645,7 +647,7 @@ void event_handler_default(struct inotify_event *event, void *data)
                     wdir = get_dir_by_wd(event->wd, wlist);
                     if (wdir && wdir->path && strlen(wdir->path)){
                         snprintf(fpath, sizeof(fpath), "%s/%s", wdir->path, event->name);
-                        remove_watch_dir_by_path(fpath, wlist);
+                        remove_watch_dir_by_path(fpath, wlist, 0);
                     }
                 }
             } else {
@@ -658,33 +660,43 @@ void event_handler_default(struct inotify_event *event, void *data)
     if (fname){
         free(fname);
     }
-    return;
+    return 0;
 }
 
 
 /* Reads events from inotify fd and calls the provided handler func to process them. 
    ! This read blocks until the change event occurs, use select of poll to make sure
  * the fd is read ready*/
-void read_events_fd(int events_fd, event_handler handler, void *data){
-    int length, i = 0;
-    int cookie = 1;
-    int x = 0;
-    char buffer[INOT_DEFAULT_EVENT_BUF_LEN];
+size_t read_events_fd(int events_fd, char *buffer, size_t buflen, event_handler handler, void *data){
+    int length = 0; 
+    int i = 0;
     struct inotify_event *event = NULL;
-    
-    length = read(fd, buffer, INOT_DEFAULT_EVENT_BUF_LEN);
-    
-    /*checking for error*/
-    if ( length < 0 ) {
-        perror( "read" );
+    if (events_fd < 0 ){
+        fprintf(stderr, "read_events_fd passed invalid fd:'%d'\n", events_fd);
+        return -1;
     }
+    if (!buffer || buflen <= 0 ){
+        fprintf(stderr, "Passed null buffer:'%s', or invalid length:'%zu'\n", buffer ? "Y" : "N",  buflen);
+        return -1;
+    } 
+    length = read(events_fd, buffer, buflen);
+    if ( length < 0 ) {
+        fprintf(stderr, "Error reading event fd\n");
+        return length; 
+    }
+    if (!handler){
+        return length;
+    } 
     /*actually read return the list of change events happens. Here, read the change event one by one and process it accordingly.*/
     while ( i < length ) {
         event = ( struct inotify_event * ) &buffer[ i ];
         printf("Got event name:%s, cookie:'%d', wd:'%d', len:%lu\n",
                event->name ?: "", event->cookie, event->wd,  (unsigned long)event->len);
-        handler(event, data);
+        if (handler(event, data)){
+            break;
+        }
         i += INOT_EVENT_SIZE + event->len;
     }
+    return length;
     
 }

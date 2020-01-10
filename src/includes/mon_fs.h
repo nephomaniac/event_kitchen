@@ -1,13 +1,18 @@
+#include <sys/inotify.h>
+#include <pthread.h>
+#include <jansson.h>
+
 #define INOT_EVENT_SIZE  (sizeof (struct inotify_event))
 #define INOT_DEFAULT_EVENT_BUF_LEN  (1024 * ( INOT_EVENT_SIZE + 16 ))
-#define BASE_DIR "/tmp/inotify_test"
 
 
 struct w_dir;
 struct event_mon;
 
-//Call back to handle detected events. 
-typedef void (*event_handler)(struct inotify_event *event, void *data);
+/* Call back to handle detected events. If using the default loop routine, 
+ * a return value of anything other than 0 will stop loop 
+ */
+typedef int (*event_handler)(struct inotify_event *event, void *data);
 // Call back to control event loop. Return 0 to continue, else stop the loop
 typedef int (*loopctl_func)(struct event_mon *mon);
 
@@ -41,11 +46,18 @@ struct event_mon {
     char event_buffer[1]; // buffer for reading in inotify events 
 };
 
-struct event_mon *create_event_monitor(const char *base_path, uint32_t mask, int recursive, event_handler handler, size_t event_buf_len);
+struct event_mon *create_event_monitor(char *base_path, uint32_t mask, int recursive, event_handler handler, size_t event_buf_len);
 
 struct event_mon *destroy_event_monitor(struct event_mon *mon); 
 
-void read_events_fd(int events_fd, event_handler handler, struct event_mon *mon);
+/* Starts the inotify monitor, adds the base dir to be monitored, as well as 
+ * any recursively discovered sub dirs. 
+ * If monitor_init() returns 0 then mon->ifd can be used to read in inotify events. 
+ */
+int monitor_init(struct event_mon *mon);
+int start_monitor_loop(struct event_mon *mon);
+
+size_t read_events_fd(int events_fd, char *buffer, size_t buflen, event_handler handler, void *data);
 
 struct w_dir *monitor_watch_dir(char *dpath, struct event_mon *mon);
 
@@ -68,6 +80,7 @@ void debug_show_list(struct w_dir *list);
 /* General, Misc, utils */
 int mon_dir_exists(char *dpath); // Check to make sure a dir at dpath exists, is accessible on the fs. 
 int mon_fd_has_events(int fd, int sec, int usec);
-int delete_file(char *fname);
+int delete_file(char *fpath);
+int event_handler_default(struct inotify_event *event, void *data);
 
 
