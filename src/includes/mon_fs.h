@@ -13,8 +13,13 @@ struct event_mon;
  * a return value of anything other than 0 will stop loop 
  */
 typedef int (*event_handler)(struct inotify_event *event, void *data);
-// Call back to control event loop. Return 0 to continue, else stop the loop
+/* Call back to control event loop. Return 0 to continue, else stop the loop
+ */
 typedef int (*loopctl_func)(struct event_mon *mon);
+/* Call back to handle when this dir is removed from watchers 
+ */
+typedef int (*removed_dir_handler)(struct event_mon *mon, struct w_dir *wdir);
+
 
 //Stucture to map inotify watch descriptors to fs paths
 struct w_dir {
@@ -23,6 +28,7 @@ struct w_dir {
     int ifd; // inotify instance fd
     int base_wd; // base watch descriptor
     struct event_mon *evt_mon; // parent event monitor
+    removed_dir_handler handle_removed; // Callback to handle when this dir is removed from watchlist 
     struct w_dir *next; // next w_dir in list
     char path[1]; // path of directory being monitored
 };
@@ -30,6 +36,8 @@ struct w_dir {
 //event_mon env 
 struct event_mon {
     int ifd; // inotify instance fd
+    int restore_base_dir; // if the base dir is found to not exist, is deleted, etc. will automatically mkdir
+    mode_t base_mode; // Dir mode for base dir if created at init defaults to S_IRWXU | S_IRGRP (740). 
     int base_wd; // base dir watch descriptor
     int recursive; // Recursively discover and add sub dirs to monitor 
     int needs_destroy; // flag to indicate this mon is in the destroy process
@@ -50,6 +58,12 @@ struct event_mon {
 struct event_mon *create_event_monitor(char *base_path, uint32_t mask, int recursive, event_handler handler, size_t event_buf_len);
 
 struct event_mon *destroy_event_monitor(struct event_mon *mon); 
+
+/* iterates over mon->watch_list removes watchers and free's each w_dir entry. */
+struct w_dir *destroy_wdir_list(struct event_mon *mon);
+
+/*remove monitors and rebuild from the base dir up */
+int reset_monitor(struct event_mon *mon);
 
 /* Starts the inotify monitor, adds the base dir to be monitored, as well as 
  * any recursively discovered sub dirs. 
@@ -82,17 +96,16 @@ struct w_dir *add_watch_dir_to_monitor(char *dpath, struct event_mon *mon);
 struct w_dir * create_watch_dir(char *dpath, struct event_mon *mon);
 
 /* Fetch w_dir with matchng watch descriptor attribute from provided w_dir list */
-struct w_dir *get_dir_by_wd(int wd, struct w_dir *list);
+struct w_dir *get_dir_by_wd(int wd, struct event_mon *mon);
 
 /* Fetch w_dir with matching 'path' from provided w_dir list */
-struct w_dir *get_dir_by_path(char *path, struct w_dir *list);
+struct w_dir *get_dir_by_path(char *path, struct event_mon *mon);
 
 /*'if' found in list, removes w_dir from list, free's w_dir */
-int remove_watch_dir(struct w_dir *wdir, struct w_dir *list, int allow_base);
-
+int remove_watch_dir(struct w_dir *wdir, struct event_mon *mon);
 /*'if' w_dir with matching path is found in list, i
  * removes w_dir from list, free's w_dir */
-int remove_watch_dir_by_path(char *path, struct w_dir *list, int allow_base);
+int remove_watch_dir_by_path(char *path, struct event_mon *mon);
 
 /* Finds parent directory using w_dir list mappings to build current event's
  * full path. 

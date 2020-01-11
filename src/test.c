@@ -15,8 +15,7 @@ static void cleanup(int sig){
 int main( )
 {
     if (!mon_dir_exists(BASE_DIR)){
-        fprintf(stderr, "Base dir does not exist. Try: 'mkdir %s'\n", BASE_DIR);
-        exit(1);
+        fprintf(stderr, "Note:Base dir does not exist, yet. %s'\n", BASE_DIR);
     }  
     signal(SIGINT, cleanup);
     /*creating the INOTIFY instance*/
