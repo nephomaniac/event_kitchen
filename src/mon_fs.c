@@ -1,5 +1,3 @@
-/* This is the sample program to notify us for the file creation and file deletion takes place in “/tmp” directory
- * From: https://www.thegeekstuff.com/2010/04/inotify-c-program-example/  */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
