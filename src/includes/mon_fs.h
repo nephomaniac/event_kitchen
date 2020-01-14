@@ -78,7 +78,7 @@ int start_monitor_loop(struct event_mon *mon);
  * Events are fed to the provided handler allong with provided *data.  handler(event, data). 
  * read here can block so fd should be read ready (use poll(), select(), etc). 
  */
-size_t read_events_fd(int events_fd, char *buffer, size_t buflen, event_handler handler, void *data);
+int read_events_fd(int events_fd, char *buffer, size_t buflen, event_handler handler, void *data);
 
 /* Adds the current dir 
  *  if mon->recursive flag is set, then subdirectories will automatically be 

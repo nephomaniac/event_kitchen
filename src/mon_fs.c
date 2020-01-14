@@ -10,6 +10,7 @@
 #include <sys/stat.h>
 #include <jansson.h>
 #include "includes/mon_fs.h"
+#include "includes/mon_log.h"
 
 /*
  Following are the available inotify events:
@@ -28,22 +29,27 @@
  IN_OPEN – File was opened
  */
 
+
 void debug_show_list(struct w_dir *list){
     struct w_dir *wlist = list;
     int cnt = 0;
     struct w_dir *ptr = wlist;
-    fprintf(stderr, "---- WATCHED DIRS:\n");
+    //LOGERROR("---- WATCHED DIRS:\n");
+    LOGDEBUG("---- WATCHED DIRS:\n");
     if (!wlist){
-        fprintf(stderr, "\tWATCH_LIST EMPTY\n");
+        //LOGERROR("\tWATCH_LIST EMPTY\n");
+        LOGDEBUG("\tWATCH_LIST EMPTY\n");
     }else{
         while(ptr != NULL) {
-            fprintf(stderr, "\tLIST[%d] = PATH:'%s', WD:'%d', mask:'0x%lx', ptr:'%p', next:'%p'\n", 
+            //LOGERROR("\tLIST[%d] = PATH:'%s', WD:'%d', mask:'0x%lx', ptr:'%p', next:'%p'\n", 
+            //    cnt,  ptr->path, ptr->wd, (unsigned long)ptr->mask, ptr, ptr->next);
+            LOGDEBUG("\tLIST[%d] = PATH:'%s', WD:'%d', mask:'0x%lx', ptr:'%p', next:'%p'\n", 
                 cnt,  ptr->path, ptr->wd, (unsigned long)ptr->mask, ptr, ptr->next);
             ptr = ptr->next;
             cnt++;
         }
     }
-    fprintf(stderr, "---- END WATCHED DIRS (%d) -----\n", cnt);
+    LOGDEBUG("---- END WATCHED DIRS (%d) -----\n", cnt);
     return;
 }
 
@@ -53,12 +59,12 @@ json_t *json_from_file(char *path){
     json_t *json = NULL;
     json_error_t error;
     if (!path || !strlen(path)){
-        fprintf(stderr, "Empty config path provided to parse_config\n");
+        LOGERROR("Empty config path provided to parse_config\n");
         return NULL;
     }
     json = json_load_file(path, 0, &error);
     if(!json) {
-        fprintf(stderr, "Error parsing config:'%s'. Error:'%s'\n", path, error.text ?: "");
+        LOGERROR("Error parsing config:'%s'. Error:'%s'\n", path, error.text ?: "");
     }
     return json;
 }
@@ -71,25 +77,25 @@ json_t *json_from_file(char *path){
  */
 int monitor_init(struct event_mon *mon){
     if (!mon){
-        fprintf(stderr, "Null event mon passed to monitor_init\n");
+        LOGERROR("Null event mon passed to monitor_init\n");
         return -1;
     }
     if (!mon->base_path || !strlen(mon->base_path)){
-        fprintf(stderr, "Empty basepath provided to create event monitor\n");
+        LOGERROR("Empty basepath provided to create event monitor\n");
         return -1;
     }
     if (mon->needs_destroy){
-        fprintf(stderr,  "Monitor marked for destroy, not doing init:'%s'\n", mon->base_path);
+        LOGERROR("Monitor marked for destroy, not doing init:'%s'\n", mon->base_path);
         return -1;
     }
     if (mon->ifd >= 0){
-        fprintf(stderr, "Monitor inotify instance already assigned for mon:'%s'\n", mon->base_path);
+        LOGERROR("Monitor inotify instance already assigned for mon:'%s'\n", mon->base_path);
     }else{
         // Create the inotify watch instance
         int ifd = inotify_init();
         /*checking for error*/
         if (ifd < 0 ) {
-            fprintf(stderr, "inotify_init error for path:'%s'\n", mon->base_path);
+            LOGERROR("inotify_init error for path:'%s'\n", mon->base_path);
             return -1; 
         }
         mon->ifd = ifd;
@@ -98,10 +104,10 @@ int monitor_init(struct event_mon *mon){
     if (!mon_dir_exists(mon->base_path)){
         // If dir does not exist and this monitor has the restore flag set, we can mkdir here...
         if (mon->restore_base_dir){
-            fprintf(stderr, "Base dir not found doing mkdir('%s')\n", mon->base_path);
+            LOGERROR("Base dir not found doing mkdir('%s')\n", mon->base_path);
             mkdir(mon->base_path, mon->base_mode);
         }else{
-            fprintf(stderr, "Error. Dir does not exist and restore_dir not set: '%s'\n", mon->base_path);
+            LOGERROR("Error. Dir does not exist and restore_dir not set: '%s'\n", mon->base_path);
             return -1;
         }
     }else{
@@ -113,7 +119,7 @@ int monitor_init(struct event_mon *mon){
     }
     struct w_dir *wdir = monitor_dir(mon->base_path, mon);
     if (!wdir){
-        fprintf(stderr, "Error adding base dir to event monitor:'%s'\n", mon->base_path);
+        LOGERROR("Error adding base dir to event monitor:'%s'\n", mon->base_path);
         close(mon->ifd);
         mon->ifd = -1;
         return -1; 
@@ -130,38 +136,38 @@ int monitor_init(struct event_mon *mon){
 }
 
 static int _stop_loop_callback(struct event_mon *mon){
-    printf("Stopping loop for mon base dir:'%s'\n", mon->base_path ?: "");
+    LOGDEBUG("Stopping loop for mon base dir:'%s'\n", mon->base_path ?: "");
     return 1;
 }
 
 void stop_monitor_loop(struct event_mon *mon){
-    printf("Stopping loop, setting loopctl\n");
+    LOGDEBUG("Stopping loop, setting loopctl\n");
     mon->loopctl = _stop_loop_callback; 
 }
 
 int start_monitor_loop(struct event_mon *mon){
     int cnt = 0;
     if (!mon || !mon->handler){
-       fprintf(stderr, "Err starting mon loop. Mon null:'%s', mon->handler null:'%s'\n", 
+       LOGERROR("Err starting mon loop. Mon null:'%s', mon->handler null:'%s'\n", 
                 mon ? "Y":"N", mon->handler ? "Y":"N"); 
         return -1;
     }
-    printf("Start Monitor Loop with following dirs...\n");
+    LOGDEBUG("Start Monitor Loop with following dirs...\n");
     debug_show_list(mon->watch_list);
     for (;;){
         if (mon->needs_destroy){
-            printf("monitor marked as needs_destroy ending loop\n");
+            LOGDEBUG("monitor marked as needs_destroy ending loop\n");
             break;
         } else if (mon->loopctl){
             if (mon->loopctl(mon) != 0) {
-                printf("loopctl exited non-zero, ending loop\n");
+                LOGDEBUG("loopctl exited non-zero, ending loop\n");
                 break;
             }
         } else {
             if (mon_fd_has_events(mon->ifd, mon->interval, 0)){
-                printf("<<< start loop %d handlers >>>\n", cnt);
+                LOGDEBUG("<<< start loop %d handlers >>>\n", cnt);
                 read_events_fd(mon->ifd, mon->event_buffer, mon->buf_len, mon->handler, mon);
-                printf("<<< end loop %d handlers >>>\n", cnt);
+                LOGDEBUG("<<< end loop %d handlers >>>\n", cnt);
                 cnt++;
             }else{
                 //printf("NO EVENTS DETECTED during interval\n");
@@ -175,14 +181,14 @@ int start_monitor_loop(struct event_mon *mon){
 /*remove monitors and rebuild from the base dir up */
 int reset_monitor(struct event_mon *mon){
     if (!mon){
-        fprintf(stderr, "Was passed a null mon, bug.\n");
+        LOGERROR("Was passed a null mon, bug.\n");
         return -1;  
     }
     if (mon->needs_destroy){
-        fprintf(stderr, "Monitor marked for destroy, not restoring base dir:'%s'\n", mon->base_path ?: "");
+        LOGERROR("Monitor marked for destroy, not restoring base dir:'%s'\n", mon->base_path ?: "");
         return -1;
     }    
-    fprintf(stderr, "RESETING MONITOR for:'%s'\n", mon->base_path ?: "");
+    LOGERROR("RESETING MONITOR for:'%s'\n", mon->base_path ?: "");
     mon->base_wd = -1;
     destroy_wdir_list(mon);
     if (mon->ifd >= 0){
@@ -206,12 +212,12 @@ struct event_mon *create_event_monitor(char *base_path,
     int ifd = -1;
     char *mon_base_path = NULL;
     if (!base_path || !strlen(base_path)){
-        fprintf(stderr, "Empty basepath provided to create event monitor\n");
+        LOGERROR("Empty basepath provided to create event monitor\n");
         return NULL;
     }
     mon_base_path = strdup(base_path);
     if (!mon_base_path){
-        fprintf(stderr, "Failed to alloc base_path during create event monitor:'%s'\n", base_path);
+        LOGERROR("Failed to alloc base_path during create event monitor:'%s'\n", base_path);
         return NULL;
     } 
     // Calc this monitor instance's event buffer size
@@ -224,13 +230,13 @@ struct event_mon *create_event_monitor(char *base_path,
     // Allocate the monitor instance + it's event buffer...
     mon = calloc(1, sizeof(struct event_mon) + buflen);
     if (!mon){
-        fprintf(stderr, "Error allocating new event monitor!\n");
+        LOGERROR("Error allocating new event monitor!\n");
         close(ifd); 
         return NULL;
     }
     // Init the monitors lock just in case this is used in a threaded app some day...
     if (pthread_mutex_init(&mon->lock, NULL) != 0) { 
-        fprintf(stderr,"Mutex lock init has failed. Base dir:'%s'\n", base_path);
+        LOGERROR("Mutex lock init has failed. Base dir:'%s'\n", base_path);
         mon = destroy_event_monitor(mon);
         return NULL; 
     }
@@ -263,7 +269,7 @@ struct event_mon *create_event_monitor(char *base_path,
 
 // Remove and free all the watch dirs 
 struct w_dir *destroy_wdir_list(struct event_mon *mon){
-    printf("Destroy watch list start\n");
+    LOGDEBUG("Destroy watch list start\n");
     struct w_dir *ptr = mon->watch_list;
     struct w_dir *cur = mon->watch_list;
     while (ptr != NULL){
@@ -272,19 +278,25 @@ struct w_dir *destroy_wdir_list(struct event_mon *mon){
         // remove() also frees the w_dir
         remove_watch_dir(cur, mon);
     }
-    printf("Done with destroy. List should be empty...\n");
+    LOGDEBUG("Done with destroy. List should be empty...\n");
     debug_show_list(mon->watch_list);
     return ptr;
 }
 
 /* Destroy and free an event_mon instance. 
- * returns null to allow assignment by caller. */
+ * returns null to allow assignment by caller. 
+    (From http://man7.org/linux/man-pages/man7/inotify.7.html)
+    When all file descriptors referring to an inotify instance have
+    been closed (using close(2)), the underlying object and its
+    resources are freed for reuse by the kernel; all associated
+    watches are automatically freed.
+*/
 struct event_mon *destroy_event_monitor(struct event_mon *mon){
     if (!mon){
-        fprintf(stderr, "destroy_event_monitor provided a null monitor\n");
+        LOGERROR("destroy_event_monitor provided a null monitor\n");
         return NULL;
     }
-    printf("Destroying mon path:'%s', list:'%p'\n", mon->base_path ?:"", mon->watch_list ?: 0); 
+    LOGDEBUG("Destroying mon path:'%s', list:'%p'\n", mon->base_path ?:"", mon->watch_list ?: 0); 
     pthread_mutex_lock(&mon->lock);
     mon->needs_destroy = 1;
     stop_monitor_loop(mon);
@@ -296,7 +308,7 @@ struct event_mon *destroy_event_monitor(struct event_mon *mon){
     if (mon->jconfig){
         json_decref(mon->jconfig);
     }
-    printf("Destroy removing the following watched dirs...\n"); 
+    LOGDEBUG("Destroy removing the following watched dirs...\n"); 
     debug_show_list(mon->watch_list);
    
     // Remove and free all the watch dirs 
@@ -320,23 +332,23 @@ struct w_dir * create_watch_dir(char *dpath, struct event_mon *mon){
     int inotify_fd;
     uint32_t mask;
     if (!dpath || !strlen(dpath)){
-        fprintf(stderr, "Null dir name provided\n");
+        LOGERROR("Null dir name provided\n");
         return NULL;
     }
     if (!mon){
-        fprintf(stderr, "Null event monitor provided\n");
+        LOGERROR("Null event monitor provided\n");
         return NULL;
     }
     inotify_fd = mon->ifd;
     mask = mon->mask; //IN_CREATE | IN_DELETE | IN_MODIFY
     if (inotify_fd < 0){
-        fprintf(stderr, "Bad inotify instance fd provided:'%d'\n", inotify_fd);
+        LOGERROR("Bad inotify instance fd provided:'%d'\n", inotify_fd);
         return NULL;
     }
     // Add dir path to our watcher
     int wd = inotify_add_watch( inotify_fd, dpath, mask);
     if (wd < 0){
-        fprintf(stderr, "Could not add watcher for path:'%s', instance fd:'%d'\n", dpath ?: "", inotify_fd);
+        LOGERROR("Could not add watcher for path:'%s', instance fd:'%d'\n", dpath ?: "", inotify_fd);
         return NULL;
     }
     struct w_dir *newd = calloc(1, sizeof(struct w_dir) + strlen(dpath));
@@ -385,12 +397,12 @@ struct w_dir * get_dir_by_path(char *path, struct event_mon *mon){
 // Create mapping for dir to watch descriptor and add to the event_monitor list...
 struct w_dir *add_watch_dir_to_monitor(char *dpath, struct event_mon *mon){
     if (!mon){
-        fprintf(stderr, "Was provided null event_mon\n");
+        LOGERROR("Was provided null event_mon\n");
         return NULL;
     }
     struct w_dir *wdir = NULL;
     if (!dpath || !strlen(dpath)){
-        fprintf(stderr, "Null dir name provided\n");
+        LOGERROR("Null dir name provided\n");
         return NULL;
     }
     
@@ -403,16 +415,16 @@ struct w_dir *add_watch_dir_to_monitor(char *dpath, struct event_mon *mon){
     }else{
         wdir = get_dir_by_path(dpath, mon);
         if (wdir){
-            printf("Dir already in watchlist:'%s', wd:'%d'\n", wdir->path, wdir->wd);
+            LOGDEBUG("Dir already in watchlist:'%s', wd:'%d'\n", wdir->path, wdir->wd);
             return wdir;
         }
     }
     //Create a new item and add it to the end of the list...
     wdir = create_watch_dir(dpath, mon);
     if (!wdir){
-        fprintf(stderr, "Failed to creat new wdir for path:'%s'\n", dpath);
+        LOGERROR("Failed to creat new wdir for path:'%s'\n", dpath);
     }else{
-        printf("Inserting element to watch list: path:'%s', wd:'%d'\n", wdir->path, wdir->wd);
+        LOGDEBUG("Inserting element to watch list: path:'%s', wd:'%d'\n", wdir->path, wdir->wd);
         ptr = mon->watch_list;
         while(ptr != NULL) {
             if (!ptr->next){
@@ -430,21 +442,21 @@ struct w_dir *add_watch_dir_to_monitor(char *dpath, struct event_mon *mon){
 int remove_watch_dir(struct w_dir *wdir, struct event_mon *mon){
     int base_removed = 0;
     if (!mon){
-        fprintf(stderr, "Null monitor provided to remove_remove_watch_dir()\n");
+        LOGERROR("Null monitor provided to remove_remove_watch_dir()\n");
         return -1;
     }
     struct w_dir *wlist = mon->watch_list;
     if (!wdir){
-        fprintf(stderr, "Null dir provided to remove_watch_dir()\n");
+        LOGERROR("Null dir provided to remove_watch_dir()\n");
         return -1;
     }
     if (!wlist){
-        fprintf(stderr, "Empty list provided\n");
+        LOGERROR("Empty list provided\n");
         return -1;
     }
     struct w_dir *cur = wlist;
     struct w_dir *last = NULL;
-    printf("Attempting to remove wdir->path:'%s', wdir:'%p', next:'%p', list:'%p'\n",
+    LOGDEBUG("Attempting to remove wdir->path:'%s', wdir:'%p', next:'%p', list:'%p'\n",
                  wdir->path ?: "", wdir, wdir->next ?: 0, wlist ?: 0);
     int cnt = 0;
     while(cur != NULL) {
@@ -452,7 +464,7 @@ int remove_watch_dir(struct w_dir *wdir, struct event_mon *mon){
             if ((mon->base_wd) >= 0 && (wdir->wd == mon->base_wd)) {
                 base_removed = 1;
             }
-            printf("Found wdir to remove at position:'%d'\n", cnt);
+            LOGDEBUG("Found wdir to remove at position:'%d'\n", cnt);
             if (last){
                 last->next = cur->next;
             }else{
@@ -473,24 +485,24 @@ int remove_watch_dir(struct w_dir *wdir, struct event_mon *mon){
         }
     }
     if (base_removed){
-        fprintf(stderr, "Deleted base dir:'%s'\n", mon->base_path ?: ""); 
+        LOGERROR("Deleted base dir:'%s'\n", mon->base_path ?: ""); 
         if (!mon->needs_destroy){
             reset_monitor(mon);
         }
     }
-    printf("Done removing wdir, list after...\n");
+    LOGDEBUG("Done removing wdir, list after...\n");
     debug_show_list(mon->watch_list);
     return -1;
 }
 
 int remove_watch_dir_by_path(char *path, struct event_mon *mon){
     if (!mon){
-        fprintf(stderr, "Empty mon provided\n");
+        LOGERROR("Empty mon provided\n");
         return -1;
     }
     struct w_dir *wdir = get_dir_by_path(path, mon);
     if (!wdir){
-        fprintf(stderr, "Could not find watched dir by path:'%s'\n", path ?: "");
+        LOGERROR("Could not find watched dir by path:'%s'\n", path ?: "");
         debug_show_list(mon->watch_list);
         return -1;
     }
@@ -506,14 +518,14 @@ char *create_wd_full_path(int wd, char *name, struct event_mon *mon){
     char *ret = NULL;
     struct w_dir *wdir = get_dir_by_wd(wd, mon);
     if (!wdir){
-        fprintf(stderr, "Failed to find wd:'%d' for full path. name:'%s'\n", wd, name ?: "");
+        LOGERROR("Failed to find wd:'%d' for full path. name:'%s'\n", wd, name ?: "");
         debug_show_list(NULL);
         return NULL;
     }
     size_t total = strlen(wdir->path) + strlen(name) + 2;
     ret = malloc(total);
     if (!ret){
-        fprintf(stderr, "Failed to alloc full path for wd\n");
+        LOGERROR("Failed to alloc full path for wd\n");
         return NULL;
     }
     snprintf(ret, total, "%s%s%s", wdir->path, name ? "/" : "",  name ?: "");
@@ -532,23 +544,23 @@ struct w_dir *monitor_dir(char *dpath, struct event_mon *mon){
     struct stat filestat;
     struct w_dir *wdir = NULL;
     if (!dpath || !strlen(dpath)){
-        fprintf(stderr, "Null dir name provided\n");
+        LOGERROR("Null dir name provided\n");
         return NULL;
     }
     if (!mon){
-        fprintf(stderr, "Null event monitor  provided\n");
+        LOGERROR("Null event monitor  provided\n");
         return NULL;
     }
     folder = opendir(dpath);
     if(folder == NULL){
-        fprintf(stderr, "Unable to read directory:'%s'\n", dpath);
+        LOGERROR("Unable to read directory:'%s'\n", dpath);
         return NULL;
     }
     wdir = add_watch_dir_to_monitor(dpath, mon);
     if (!wdir) {
-        fprintf(stderr, "Error, adding Dir to watchlist:'%s'\n",dpath);
+        LOGERROR("Error, adding Dir to watchlist:'%s'\n",dpath);
     }else{
-        printf("Added Dir to watchlist:'%s', wd:'%d'\n", wdir->path, wdir->wd);
+        LOGDEBUG("Added Dir to watchlist:'%s', wd:'%d'\n", wdir->path, wdir->wd);
     }
     if (!mon->recursive){
         // No need to recursively discover and add sub dirs, return this w_dir now...
@@ -564,9 +576,9 @@ struct w_dir *monitor_dir(char *dpath, struct event_mon *mon){
             snprintf(subdir, sizeof(subdir), "%s/%s", dpath, entry->d_name);
             stat(subdir, &filestat);
             if( S_ISDIR(filestat.st_mode)) {
-                printf("Found sub dir for path:'%s'\n", entry->d_name);
+                LOGDEBUG("Found sub dir for path:'%s'\n", entry->d_name);
                 if (!monitor_dir(subdir, mon)){
-                    fprintf(stderr, "Error adding dir to watchlist:'%s'\n", entry->d_name);
+                    LOGERROR("Error adding dir to watchlist:'%s'\n", entry->d_name);
                 };
             }
         }
@@ -608,7 +620,7 @@ int mon_fd_has_events(int fd, float sec, float usec){
     
     /* timeout after five seconds */
     if (sec <= 0 && usec <= 0){
-        fprintf(stderr, "Warning invalid interval. Sec:'%f' Usec:'%f'. Setting to 1 sec \n", sec, usec);
+        LOGERROR("Warning invalid interval. Sec:'%f' Usec:'%f'. Setting to 1 sec \n", sec, usec);
         sec = 1;
     }
     time.tv_sec = sec;
@@ -645,21 +657,21 @@ int mon_fd_has_events(int fd, float sec, float usec){
 int delete_file(char *fpath){
     int ret = -1;
     if (!fpath || !strlen(fpath)){
-        fprintf(stderr, "empty filename provided to delete_file()\n");
+        LOGERROR("empty filename provided to delete_file()\n");
         return -1;
     }
     if (remove(fpath) == 0){
-        printf("Automatically deleted file:'%s'\n", fpath);
+        LOGDEBUG("Automatically deleted file:'%s'\n", fpath);
         ret = 0;
     } else {
-        fprintf(stderr, "Failed, delete_file()\n");
+        LOGERROR("Failed, delete_file()\n");
     }
     return ret;
 }
 
 int event_handler_default(struct inotify_event *event, void *data){
     if (!data){
-        fprintf(stderr, "Null data passed to handle data\n");
+        LOGERROR("Null data passed to handle data\n");
         return -1;
     }
     char *fname = NULL;
@@ -674,25 +686,25 @@ int event_handler_default(struct inotify_event *event, void *data){
         }
         if ( event->mask & IN_CREATE ) {
             if ( event->mask & IN_ISDIR ) {
-                printf( "MONITOR: New directory '%s' created.\n", fname ?: "");
+                LOGDEBUG( "MONITOR: New directory '%s' created.\n", fname ?: "");
                 // If recursive is set, automatically add this new subdir 
                 if (mon->recursive){
                     monitor_dir(fname, mon);
                 }
             } else {
                 if ( event->mask & IN_MODIFY){
-                    printf( "MONITOR: File '%s' was created and modified\n", fname ?: "");
+                    LOGDEBUG( "MONITOR: File '%s' was created and modified\n", fname ?: "");
                     return 0;
                 }
                 if (event->cookie){
-                    printf( "MONITOR: New file '%s' created. Cookie set so heads up on paired event:'%lu'\n", fname ?: "", (unsigned long) event->cookie);
+                    LOGDEBUG( "MONITOR: New file '%s' created. Cookie set so heads up on paired event:'%lu'\n", fname ?: "", (unsigned long) event->cookie);
                 }else{
-                    printf( "MONITOR: New file '%s' created.\n", fname ?: "" );
+                    LOGDEBUG( "MONITOR: New file '%s' created.\n", fname ?: "" );
                 }
             }
         } else if ( event->mask & IN_DELETE) {
             if ( event->mask & IN_ISDIR ) {
-                printf( "MONITOR: Directory '%s' deleted. Removing wd:'%d' from watchlist\n", fname ?: "", event->wd);
+                LOGDEBUG( "MONITOR: Directory '%s' deleted. Removing wd:'%d' from watchlist\n", fname ?: "", event->wd);
                 /* Remove the dir from the watch list...
                  * The dir path will need to be derived from the mapped w_dir in order
                  * to get the wd to remove from inotify mon_fd */
@@ -705,13 +717,13 @@ int event_handler_default(struct inotify_event *event, void *data){
 
                 }
             } else {
-                printf( "MONITOR: File '%s' deleted.\n", fname ?: "" );
+                LOGDEBUG( "MONITOR: File '%s' deleted.\n", fname ?: "" );
             }
         }else if ( event->mask & IN_MODIFY){
-            printf( "MONITOR: File '%s' was modified\n", fname ?: "");
+            LOGDEBUG( "MONITOR: File '%s' was modified\n", fname ?: "");
         }else if (event->mask & IN_DELETE_SELF){
             wdir = get_dir_by_wd(event->wd, mon);
-            printf("MONITOR: Watcher dir was deleted:'%s'\n", wdir->path ?: "");
+            LOGDEBUG("MONITOR: Watcher dir was deleted:'%s'\n", wdir->path ?: "");
             if (wdir){ 
                 remove_watch_dir(wdir, mon); 
             }
@@ -726,31 +738,52 @@ int event_handler_default(struct inotify_event *event, void *data){
 
 /* Reads events from inotify fd and calls the provided handler func to process them. 
    ! This read blocks until the change event occurs, use select of poll to make sure
- * the fd is read ready*/
-size_t read_events_fd(int events_fd, char *buffer, size_t buflen, event_handler handler, void *data){
+ * the fd is read ready
+ * An optional handler can be provided. If the handler returns non-zero this will 
+   exit the loop, and the result of the handler is returned. 
+   Returns zero on success. 
+ */
+int read_events_fd(int events_fd, char *buffer, size_t buflen, event_handler handler, void *data){
     int length = 0; 
     int i = 0;
     struct inotify_event *event = NULL;
     if (events_fd < 0 ){
-        fprintf(stderr, "read_events_fd passed invalid fd:'%d'\n", events_fd);
+        LOGERROR("read_events_fd passed invalid fd:'%d'\n", events_fd);
         return -1;
     }
     if (!buffer || buflen <= 0 ){
-        fprintf(stderr, "Passed null buffer:'%s', or invalid length:'%zu'\n", buffer ? "Y" : "N",  buflen);
+        LOGERROR("Passed null buffer:'%s', or invalid length:'%zu'\n", buffer ? "Y" : "N",  buflen);
         return -1;
     } 
     length = read(events_fd, buffer, buflen);
     if ( length < 0 ) {
-        fprintf(stderr, "Error reading event fd\n");
+        LOGERROR("Error reading event fd\n");
         return length; 
     }
     if (!handler){
+        // Since this is just an example loop, drain the fd and return...
         return length;
-    } 
+    }
+    size_t remaining = length; 
     /*actually read return the list of change events happens. Here, read the change event one by one and process it accordingly.*/
     while ( i < length ) {
+        remaining = length - i;
+        // This is just a sample, but this can be refactored to better handle truncation
+        if (remaining < INOT_EVENT_SIZE){
+            LOGERROR("Truncated event! Remaining:'%lu', sizeof(event):'%lu'\n",
+                    (unsigned long)remaining, (unsigned long)INOT_EVENT_SIZE); 
+            break;
+        }
         event = ( struct inotify_event * ) &buffer[ i ];
+        if (remaining < (INOT_EVENT_SIZE + event->len)){
+            LOGERROR("Truncated event! Remaining:'%lu', sizeof(event):'%lu', len:'%lu'\n",
+                    (unsigned long)remaining, (unsigned long)INOT_EVENT_SIZE, (unsigned long)event->len); 
+            break;
+
+        }
+        // Show some debug info about the event
         print_event(event);
+        // if a handler was provided, call it here...
         if (handler(event, data)){
             break;
         }
@@ -767,18 +800,18 @@ void print_event(struct inotify_event *event){
     char buf[256];
     char *ptr = buf;
     size_t buflen = sizeof(buf);
-    printf("---------------------------------------------------\n");
+    LOGDEBUG("---------------------------------------------------\n");
     if (!event){
-        printf("Passed null event to print!\n");
-        printf("---------------------------------------------------\n");
+        LOGDEBUG("Passed null event to print!\n");
+        LOGDEBUG("---------------------------------------------------\n");
         return;
     }
-    printf("\tEVENT: name:'%s'\n", event->name ?: "");
-    printf("\tEVENT: mask:'0x%lx', cookie:'%d', wd:'%d', len:%lu\n",
+    LOGDEBUG("\tEVENT: name:'%s'\n", event->name ?: "");
+    LOGDEBUG("\tEVENT: mask:'0x%lx', cookie:'%d', wd:'%d', len:%lu\n",
                (unsigned long)event->mask, event->cookie, event->wd,  (unsigned long)event->len);
     if (mask == 0){
-        printf("\tMASK: NONE\n");   
-        printf("---------------------------------------------------\n");
+        LOGDEBUG("\tMASK: NONE\n");   
+        LOGDEBUG("---------------------------------------------------\n");
         return; 
     }
     if (mask & IN_ACCESS){
@@ -931,7 +964,7 @@ void print_event(struct inotify_event *event){
               return; //strlen(buf);
          }
     }*/
-    printf("\tMASK: %s\n", buf);   
-    printf("---------------------------------------------------\n");
+    LOGDEBUG("\tMASK: %s\n", buf);   
+    LOGDEBUG("---------------------------------------------------\n");
     return;
 }
