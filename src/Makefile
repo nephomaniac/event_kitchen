@@ -3,13 +3,17 @@ IDIR = "./includes"
 PKG_SOURCE_VERSION:=$(COMMIT)
 #INCLUDES = "-I/usr/include/libnl3"
 
+## ubuntu pre-reqs...
+# apt-get install libmosquitto-dev
+# apt-get install libjansson-dev
+
 CFLAGS= -g -O2 -Wall -Wextra -Isrc -I$(IDIR) $(INCLUDES)
 
 ODIR=obj
 LDIR =../lib
 
 #LIBS=-lpthread -ljansson -lmosquitto  -luci
-LIBS=-lpthread -ljansson 
+LIBS+=-lpthread -ljansson -lmosquitto
 
 TARGET=test
 SO_TARGET=$(patsubst %.a,%.so,$(TARGET))

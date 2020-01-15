@@ -72,7 +72,7 @@ int reset_monitor(struct event_mon *mon);
 int monitor_init(struct event_mon *mon);
 
 /*Starts a generic loop checking monitor. Used for POC */
-int start_monitor_loop(struct event_mon *mon);
+int start_monitor_loop_example(struct event_mon *mon);
 
 /* Read events from inotify fd into provided buffer. 
  * Events are fed to the provided handler allong with provided *data.  handler(event, data). 
@@ -126,9 +126,7 @@ void print_event(struct inotify_event *event);
 /* General, Misc, utils */
 /*************************************************************/
 /* Check to make sure a dir at dpath exists, is accessible on the fs. */
-int mon_dir_exists(char *dpath); 
 int mon_fd_has_events(int fd, float sec, float usec);
-int delete_file(char *fpath);
-int event_handler_default(struct inotify_event *event, void *data);
+int example_event_handler(struct inotify_event *event, void *data);
 
 

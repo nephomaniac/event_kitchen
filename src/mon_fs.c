@@ -10,7 +10,7 @@
 #include <sys/stat.h>
 #include <jansson.h>
 #include "includes/mon_fs.h"
-#include "includes/mon_log.h"
+#include "includes/mon_utils.h"
 
 /*
  Following are the available inotify events:
@@ -52,23 +52,6 @@ void debug_show_list(struct w_dir *list){
     LOGDEBUG("---- END WATCHED DIRS (%d) -----\n", cnt);
     return;
 }
-
-
-
-json_t *json_from_file(char *path){
-    json_t *json = NULL;
-    json_error_t error;
-    if (!path || !strlen(path)){
-        LOGERROR("Empty config path provided to parse_config\n");
-        return NULL;
-    }
-    json = json_load_file(path, 0, &error);
-    if(!json) {
-        LOGERROR("Error parsing config:'%s'. Error:'%s'\n", path, error.text ?: "");
-    }
-    return json;
-}
-
 
 
 /* Starts the inotify monitor, adds the base dir to be monitored, as well as 
@@ -145,7 +128,7 @@ void stop_monitor_loop(struct event_mon *mon){
     mon->loopctl = _stop_loop_callback; 
 }
 
-int start_monitor_loop(struct event_mon *mon){
+int start_monitor_loop_example(struct event_mon *mon){
     int cnt = 0;
     if (!mon || !mon->handler){
        LOGERROR("Err starting mon loop. Mon null:'%s', mon->handler null:'%s'\n", 
@@ -588,26 +571,6 @@ struct w_dir *monitor_dir(char *dpath, struct event_mon *mon){
     return(wdir);
 }
 
-/* Util func to check if a dir exists and is accesible*/
-int mon_dir_exists(char *dpath){
-    
-    if (!dpath || !strlen(dpath)){
-        return 0;
-    }
-    DIR* dir = opendir(dpath);
-    if (dir) {
-        /* Directory exists. */
-        closedir(dir);
-        return 1;
-    } else if (ENOENT == errno) {
-        return 0;
-        /* Directory does not exist. */
-    } else {
-        return 0;
-        /* opendir() failed for some other reason. */
-    }
-    return 0;
-}
 
 /* Sample function to be used with an external loop to 
  * show how select/poll could be used to wait for the inotify fd 
@@ -651,25 +614,7 @@ int mon_fd_has_events(int fd, float sec, float usec){
 }
 
 
-
-
-
-int delete_file(char *fpath){
-    int ret = -1;
-    if (!fpath || !strlen(fpath)){
-        LOGERROR("empty filename provided to delete_file()\n");
-        return -1;
-    }
-    if (remove(fpath) == 0){
-        LOGDEBUG("Automatically deleted file:'%s'\n", fpath);
-        ret = 0;
-    } else {
-        LOGERROR("Failed, delete_file()\n");
-    }
-    return ret;
-}
-
-int event_handler_default(struct inotify_event *event, void *data){
+int example_event_handler(struct inotify_event *event, void *data){
     if (!data){
         LOGERROR("Null data passed to handle data\n");
         return -1;
