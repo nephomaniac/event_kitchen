@@ -13,7 +13,9 @@ def on_connect(client, userdata, flags, rc):
 
 # The callback for when a PUBLISH message is received from the server.
 def on_message(client, userdata, msg):
-    print("topic:"+msg.topic+", message:"+str(msg.payload))
+    #print("topic:"+msg.topic+", id:" +str(msg.id)+", message:"+str(msg.payload))
+    print("topic:'{0}, qos:'{1}, retain:{2}".format(msg.topic, msg.qos,msg.retain))
+    print("\tPayload:'{0}'".format(msg.payload.decode("utf-8")))
 
 client = mqtt.Client()
 client.username_pw_set(username="mqttuser", password="mqttpass");
