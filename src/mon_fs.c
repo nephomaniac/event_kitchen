@@ -12,6 +12,15 @@
 #include "includes/mon_fs.h"
 #include "includes/mon_utils.h"
 
+/* POC to show how inotify events can be used to monitor a directory and dynamically + recursively add/remove triggers
+ * on the files and child directories. 
+ * Other eventing libraries provide a subset of the inotify events, and some notion of recursive discovery, but
+ * they were found to be incomplete and/or buggy during testing. 
+ * This is intended to be used with existing event libs, and/or in a byob loop provided by the consumer.  
+ */ 
+
+
+
 /*
  Following are the available inotify events:
  
