@@ -58,7 +58,7 @@ void debug_show_list(struct w_dir *list){
  * any recursively discovered sub dirs. 
  * If monitor_init() returns 0 then mon->ifd can be used to read in inotify events. 
  */
-int monitor_init(struct event_mon *mon){
+int monitor_init(struct fs_event_manager *mon){
     if (!mon){
         LOGERROR("Null event mon passed to monitor_init\n");
         return -1;
@@ -118,17 +118,17 @@ int monitor_init(struct event_mon *mon){
     return 0;  
 }
 
-static int _stop_loop_callback(struct event_mon *mon){
+static int _stop_loop_callback(struct fs_event_manager *mon){
     LOGDEBUG("Stopping loop for mon base dir:'%s'\n", mon->base_path ?: "");
     return 1;
 }
 
-void stop_monitor_loop(struct event_mon *mon){
+void stop_monitor_loop(struct fs_event_manager *mon){
     LOGDEBUG("Stopping loop, setting loopctl\n");
     mon->loopctl = _stop_loop_callback; 
 }
 
-int start_monitor_loop_example(struct event_mon *mon){
+int start_monitor_loop_example(struct fs_event_manager *mon){
     int cnt = 0;
     if (!mon || !mon->handler){
        LOGERROR("Err starting mon loop. Mon null:'%s', mon->handler null:'%s'\n", 
@@ -162,7 +162,7 @@ int start_monitor_loop_example(struct event_mon *mon){
 }
 
 /*remove monitors and rebuild from the base dir up */
-int reset_monitor(struct event_mon *mon){
+int reset_monitor(struct fs_event_manager *mon){
     if (!mon){
         LOGERROR("Was passed a null mon, bug.\n");
         return -1;  
@@ -186,12 +186,12 @@ int reset_monitor(struct event_mon *mon){
  * Monitor will need to be started with monitor_init() afterwards 
  * To be free'd by caller
  */ 
-struct event_mon *create_event_monitor(char *base_path, 
+struct fs_event_manager *create_event_monitor(char *base_path, 
                                        uint32_t mask,
                                        int recursive, 
                                        event_handler handler, 
                                        size_t event_buf_len){
-    struct event_mon *mon = NULL;
+    struct fs_event_manager *mon = NULL;
     int ifd = -1;
     char *mon_base_path = NULL;
     if (!base_path || !strlen(base_path)){
@@ -211,7 +211,7 @@ struct event_mon *create_event_monitor(char *base_path,
         buflen = (size_t) INOT_DEFAULT_EVENT_BUF_LEN; 
     }
     // Allocate the monitor instance + it's event buffer...
-    mon = calloc(1, sizeof(struct event_mon) + buflen);
+    mon = calloc(1, sizeof(struct fs_event_manager) + buflen);
     if (!mon){
         LOGERROR("Error allocating new event monitor!\n");
         close(ifd); 
@@ -251,7 +251,7 @@ struct event_mon *create_event_monitor(char *base_path,
 }
 
 // Remove and free all the watch dirs 
-struct w_dir *destroy_wdir_list(struct event_mon *mon){
+struct w_dir *destroy_wdir_list(struct fs_event_manager *mon){
     LOGDEBUG("Destroy watch list start\n");
     struct w_dir *ptr = mon->watch_list;
     struct w_dir *cur = mon->watch_list;
@@ -274,7 +274,7 @@ struct w_dir *destroy_wdir_list(struct event_mon *mon){
     resources are freed for reuse by the kernel; all associated
     watches are automatically freed.
 */
-struct event_mon *destroy_event_monitor(struct event_mon *mon){
+struct fs_event_manager *destroy_event_monitor(struct fs_event_manager *mon){
     if (!mon){
         LOGERROR("destroy_event_monitor provided a null monitor\n");
         return NULL;
@@ -311,7 +311,7 @@ struct event_mon *destroy_event_monitor(struct event_mon *mon){
 /* Create/allocate new watch dir.  
  * To be free'd by caller
  */
-struct w_dir * create_watch_dir(char *dpath, struct event_mon *mon){
+struct w_dir * create_watch_dir(char *dpath, struct fs_event_manager *mon){
     int inotify_fd;
     uint32_t mask;
     if (!dpath || !strlen(dpath)){
@@ -347,7 +347,7 @@ struct w_dir * create_watch_dir(char *dpath, struct event_mon *mon){
 }
 
 /* Fetch w_dir with matchng watch descriptor attribute from provided w_dir list */
-struct w_dir * get_dir_by_wd(int wd, struct event_mon *mon){
+struct w_dir * get_dir_by_wd(int wd, struct fs_event_manager *mon){
     if (!mon || !mon->watch_list){
         return NULL;;
     }
@@ -362,7 +362,7 @@ struct w_dir * get_dir_by_wd(int wd, struct event_mon *mon){
 }
 
 /* Fetch w_dir with matching 'path' from provided w_dir list */
-struct w_dir * get_dir_by_path(char *path, struct event_mon *mon){
+struct w_dir * get_dir_by_path(char *path, struct fs_event_manager *mon){
     if (!mon || !mon->watch_list){
         return NULL;
     }
@@ -378,7 +378,7 @@ struct w_dir * get_dir_by_path(char *path, struct event_mon *mon){
 
 
 // Create mapping for dir to watch descriptor and add to the event_monitor list...
-struct w_dir *add_watch_dir_to_monitor(char *dpath, struct event_mon *mon){
+struct w_dir *add_watch_dir_to_monitor(char *dpath, struct fs_event_manager *mon){
     if (!mon){
         LOGERROR("Was provided null event_mon\n");
         return NULL;
@@ -422,7 +422,7 @@ struct w_dir *add_watch_dir_to_monitor(char *dpath, struct event_mon *mon){
 }
 
 /*'if' found in list, removes w_dir from list, free's w_dir */ 
-int remove_watch_dir(struct w_dir *wdir, struct event_mon *mon){
+int remove_watch_dir(struct w_dir *wdir, struct fs_event_manager *mon){
     int base_removed = 0;
     if (!mon){
         LOGERROR("Null monitor provided to remove_remove_watch_dir()\n");
@@ -478,7 +478,7 @@ int remove_watch_dir(struct w_dir *wdir, struct event_mon *mon){
     return -1;
 }
 
-int remove_watch_dir_by_path(char *path, struct event_mon *mon){
+int remove_watch_dir_by_path(char *path, struct fs_event_manager *mon){
     if (!mon){
         LOGERROR("Empty mon provided\n");
         return -1;
@@ -497,7 +497,7 @@ int remove_watch_dir_by_path(char *path, struct event_mon *mon){
  * full path. 
  * Returned buffer must be free'd later by caller
  */ 
-char *create_wd_full_path(int wd, char *name, struct event_mon *mon){
+char *create_wd_full_path(int wd, char *name, struct fs_event_manager *mon){
     char *ret = NULL;
     struct w_dir *wdir = get_dir_by_wd(wd, mon);
     if (!wdir){
@@ -520,7 +520,7 @@ char *create_wd_full_path(int wd, char *name, struct event_mon *mon){
  *  if mon->recursive flag is set, then subdirectories will automatically be 
  *  discoverd and added recursively. 
  */
-struct w_dir *monitor_dir(char *dpath, struct event_mon *mon){
+struct w_dir *monitor_dir(char *dpath, struct fs_event_manager *mon){
     DIR *folder;
     char subdir[512];
     struct dirent *entry;
@@ -621,7 +621,7 @@ int example_event_handler(struct inotify_event *event, void *data){
     }
     char *fname = NULL;
     struct w_dir *wdir = NULL;
-    struct event_mon *mon = data;
+    struct fs_event_manager *mon = data;
     char fpath[256];
     fpath[0] = '\0';
     if (event){

@@ -7,7 +7,7 @@
 
 
 struct w_dir;
-struct event_mon;
+struct fs_event_manager;
 
 /* Call back to handle detected events. If using the default loop routine, 
  * a return value of anything other than 0 will stop loop 
@@ -15,10 +15,10 @@ struct event_mon;
 typedef int (*event_handler)(struct inotify_event *event, void *data);
 /* Call back to control event loop. Return 0 to continue, else stop the loop
  */
-typedef int (*loopctl_func)(struct event_mon *mon);
+typedef int (*loopctl_func)(struct fs_event_manager *mon);
 /* Call back to handle when this dir is removed from watchers 
  */
-typedef int (*removed_dir_handler)(struct event_mon *mon, struct w_dir *wdir);
+typedef int (*removed_dir_handler)(struct fs_event_manager *mon, struct w_dir *wdir);
 
 
 //Stucture to map inotify watch descriptors to fs paths
@@ -27,14 +27,14 @@ struct w_dir {
     uint32_t mask; // inotify mask to filter events
     int ifd; // inotify instance fd
     int base_wd; // base watch descriptor
-    struct event_mon *evt_mon; // parent event monitor
+    struct fs_event_manager *evt_mon; // parent event monitor
     removed_dir_handler handle_removed; // Callback to handle when this dir is removed from watchlist 
     struct w_dir *next; // next w_dir in list
     char path[1]; // path of directory being monitored
 };
 
 //event_mon env 
-struct event_mon {
+struct fs_event_manager {
     int ifd; // inotify instance fd
     int restore_base_dir; // if the base dir is found to not exist, is deleted, etc. will automatically mkdir
     mode_t base_mode; // Dir mode for base dir if created at init defaults to S_IRWXU | S_IRGRP (740). 
@@ -55,24 +55,24 @@ struct event_mon {
     char event_buffer[1]; // buffer for reading in inotify events 
 };
 
-struct event_mon *create_event_monitor(char *base_path, uint32_t mask, int recursive, event_handler handler, size_t event_buf_len);
+struct fs_event_manager *create_event_monitor(char *base_path, uint32_t mask, int recursive, event_handler handler, size_t event_buf_len);
 
-struct event_mon *destroy_event_monitor(struct event_mon *mon); 
+struct fs_event_manager *destroy_event_monitor(struct fs_event_manager *mon); 
 
 /* iterates over mon->watch_list removes watchers and free's each w_dir entry. */
-struct w_dir *destroy_wdir_list(struct event_mon *mon);
+struct w_dir *destroy_wdir_list(struct fs_event_manager *mon);
 
 /*remove monitors and rebuild from the base dir up */
-int reset_monitor(struct event_mon *mon);
+int reset_monitor(struct fs_event_manager *mon);
 
 /* Starts the inotify monitor, adds the base dir to be monitored, as well as 
  * any recursively discovered sub dirs. 
  * If monitor_init() returns 0 then mon->ifd can be used to read in inotify events. 
  */
-int monitor_init(struct event_mon *mon);
+int monitor_init(struct fs_event_manager *mon);
 
 /*Starts a generic loop checking monitor. Used for POC */
-int start_monitor_loop_example(struct event_mon *mon);
+int start_monitor_loop_example(struct fs_event_manager *mon);
 
 /* Read events from inotify fd into provided buffer. 
  * Events are fed to the provided handler allong with provided *data.  handler(event, data). 
@@ -84,34 +84,34 @@ int read_events_fd(int events_fd, char *buffer, size_t buflen, event_handler han
  *  if mon->recursive flag is set, then subdirectories will automatically be 
  *  discoverd and added recursively. 
  */
-struct w_dir *monitor_dir(char *dpath, struct event_mon *mon);
+struct w_dir *monitor_dir(char *dpath, struct fs_event_manager *mon);
 
 /* Create mapping for dir to watch descriptor and add to the event_monitor list...
  */
-struct w_dir *add_watch_dir_to_monitor(char *dpath, struct event_mon *mon);
+struct w_dir *add_watch_dir_to_monitor(char *dpath, struct fs_event_manager *mon);
 
 /* Create/allocate new watch dir.  
  * To be free'd by caller
  */
-struct w_dir * create_watch_dir(char *dpath, struct event_mon *mon);
+struct w_dir * create_watch_dir(char *dpath, struct fs_event_manager *mon);
 
 /* Fetch w_dir with matchng watch descriptor attribute from provided w_dir list */
-struct w_dir *get_dir_by_wd(int wd, struct event_mon *mon);
+struct w_dir *get_dir_by_wd(int wd, struct fs_event_manager *mon);
 
 /* Fetch w_dir with matching 'path' from provided w_dir list */
-struct w_dir *get_dir_by_path(char *path, struct event_mon *mon);
+struct w_dir *get_dir_by_path(char *path, struct fs_event_manager *mon);
 
 /*'if' found in list, removes w_dir from list, free's w_dir */
-int remove_watch_dir(struct w_dir *wdir, struct event_mon *mon);
+int remove_watch_dir(struct w_dir *wdir, struct fs_event_manager *mon);
 /*'if' w_dir with matching path is found in list, i
  * removes w_dir from list, free's w_dir */
-int remove_watch_dir_by_path(char *path, struct event_mon *mon);
+int remove_watch_dir_by_path(char *path, struct fs_event_manager *mon);
 
 /* Finds parent directory using w_dir list mappings to build current event's
  * full path. 
  * Returned buffer must be free'd later by caller
  */ 
-char *create_wd_full_path(int wd, char *name, struct event_mon *mon);
+char *create_wd_full_path(int wd, char *name, struct fs_event_manager *mon);
 
 /*************************************************************/
 /* Debug, log related utils */
